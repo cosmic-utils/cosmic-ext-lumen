@@ -12,10 +12,11 @@ pub fn http_client() -> Result<Client, reqwest::Error> {
 }
 
 /// Shared transport only. Each feature owns its endpoints and request types.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Api {
     pub base: Url,
     http: Client,
+    token: Option<String>,
 }
 
 impl Api {
@@ -23,7 +24,41 @@ impl Api {
         Ok(Self {
             base: normalize_instance(input)?,
             http,
+            token: None,
         })
+    }
+
+    pub fn authenticated(mut self, token: String) -> Self {
+        self.token = Some(token);
+        self
+    }
+    pub async fn post<Q: Serialize, R: DeserializeOwned>(
+        &self,
+        endpoint: &str,
+        body: &Q,
+    ) -> Result<R, String> {
+        let url = self
+            .base
+            .join(&format!("api/v3/{endpoint}"))
+            .map_err(|e| e.to_string())?;
+        let mut request = self.http.post(url).json(body);
+        if let Some(token) = &self.token {
+            request = request.bearer_auth(token);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|_| "Could not reach instance".to_string())?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "Request failed (HTTP {}). Check credentials, two-factor code, or session.",
+                response.status()
+            ));
+        }
+        response
+            .json()
+            .await
+            .map_err(|_| "Unexpected API response".into())
     }
 
     pub async fn get<Q: Serialize + ?Sized, R: DeserializeOwned>(
@@ -35,10 +70,11 @@ impl Api {
             .base
             .join(&format!("api/v3/{endpoint}"))
             .map_err(|e| e.to_string())?;
-        let response = self
-            .http
-            .get(url)
-            .query(query)
+        let mut request = self.http.get(url).query(query);
+        if let Some(token) = &self.token {
+            request = request.bearer_auth(token);
+        }
+        let response = request
             .send()
             .await
             .map_err(|e| format!("Could not reach {}: {e}", self.base))?;
@@ -84,6 +120,14 @@ pub fn normalize_instance(input: &str) -> Result<Url, String> {
     url.set_fragment(None);
     url.set_path("/");
     Ok(url)
+}
+
+impl std::fmt::Debug for Api {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Api")
+            .field("base", &self.base)
+            .finish_non_exhaustive()
+    }
 }
 
 #[cfg(test)]
@@ -132,6 +176,31 @@ mod tests {
             String::from_utf8_lossy(&request[..count]).into_owned()
         });
         (api, handle)
+    }
+
+    #[tokio::test]
+    async fn authentication_is_scoped_to_each_client() {
+        let (api, request) = serve("200 OK", "{}").await;
+        let authenticated = api.clone().authenticated("test-token".into());
+        let _: serde_json::Value = authenticated.get("site", &()).await.unwrap();
+        assert!(
+            request
+                .await
+                .unwrap()
+                .to_lowercase()
+                .contains("authorization: bearer test-token")
+        );
+        assert!(api.token.is_none());
+        assert!(!format!("{authenticated:?}").contains("test-token"));
+        let (anonymous, request) = serve("200 OK", "{}").await;
+        let _: serde_json::Value = anonymous.get("site", &()).await.unwrap();
+        assert!(
+            !request
+                .await
+                .unwrap()
+                .to_lowercase()
+                .contains("authorization:")
+        );
     }
 
     #[tokio::test]

@@ -23,7 +23,7 @@ Enter a Lemmy instance hostname or root URL and select **Connect**. The last suc
 - Request timeouts, retryable errors, and stale-response protection when navigating.
 - System theme, native widgets, browser links, and a saved instance preference.
 
-This first milestone is read-only. Login, voting, subscriptions, posting, search, inbox, inline image downloads/cache, and API v4 support are future work. Image/link posts can be opened in the browser. NSFW posts are excluded from feed requests. Comment order follows the thread path; siblings appear by numeric ID.
+Supports saved accounts on one or multiple instances, account switching, optional two-factor login, native credential storage (Linux Secret Service, macOS Keychain, Windows Credential Manager), automatic session restoration, and the Subscribed feed. Use Anonymous to browse without a session. Remove account deletes its locally saved token. Voting, posting, search, inbox, inline image downloads/cache, and API v4 support are future work. Image/link posts can be opened in the browser. NSFW posts are excluded from feed requests. Comment order follows the thread path; siblings appear by numeric ID.
 
 ## Feature-based architecture
 

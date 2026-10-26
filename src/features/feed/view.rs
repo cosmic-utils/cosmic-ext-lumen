@@ -19,6 +19,14 @@ impl Feed {
                 widget::button::text(if self.local { "All" } else { "All ✓" })
                     .on_press(Message::Scope(false)),
             );
+        controls = controls.push(
+            widget::button::text(if self.subscribed {
+                "Subscribed ✓"
+            } else {
+                "Subscribed"
+            })
+            .on_press(Message::Subscribed),
+        );
         let mut refresh = widget::button::standard("Refresh");
         if !self.busy {
             refresh = refresh.on_press(Message::Refresh);

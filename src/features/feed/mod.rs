@@ -51,6 +51,7 @@ pub struct Feed {
     pub posts: Vec<PostView>,
     pub sort: Sort,
     pub local: bool,
+    pub subscribed: bool,
     pub busy: bool,
     pub loaded: bool,
     pub error: Option<String>,
@@ -62,6 +63,7 @@ pub struct Feed {
 #[derive(Clone, Debug)]
 pub enum Message {
     Refresh,
+    Subscribed,
     More,
     Sort(usize),
     Scope(bool),
@@ -92,13 +94,18 @@ impl Feed {
         let generation = self.generation;
         let (sort, local) = (self.sort, self.local);
         let cursor = if append { self.cursor.clone() } else { None };
-        Task::perform(service::load(api, sort, local, cursor), move |result| {
-            Message::Loaded(generation, append, result)
-        })
+        Task::perform(
+            service::load(api, sort, local, self.subscribed, cursor),
+            move |result| Message::Loaded(generation, append, result),
+        )
     }
 
     pub fn update(&mut self, message: Message) -> (Task<Message>, Option<PostView>) {
         match message {
+            Message::Subscribed => {
+                self.subscribed = true;
+                return (self.reload(), None);
+            }
             Message::Refresh => return (self.reload(), None),
             Message::More if !self.busy && self.cursor.is_some() => {
                 return (self.request(true), None);
@@ -109,6 +116,7 @@ impl Feed {
             }
             Message::Scope(local) => {
                 self.local = local;
+                self.subscribed = false;
                 return (self.reload(), None);
             }
             Message::Open(id) => {

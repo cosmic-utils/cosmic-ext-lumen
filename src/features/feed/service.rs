@@ -10,12 +10,15 @@ pub async fn load(
     api: Api,
     sort: Sort,
     local: bool,
+    subscribed: bool,
     cursor: Option<PaginationCursor>,
 ) -> Result<GetPostsResponse, String> {
     api.get(
         "post/list",
         &GetPosts {
-            type_: Some(if local {
+            type_: Some(if subscribed {
+                ListingType::Subscribed
+            } else if local {
                 ListingType::Local
             } else {
                 ListingType::All
