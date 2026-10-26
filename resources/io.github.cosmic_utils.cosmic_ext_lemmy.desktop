@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Lemmy
+Comment=Browse Lemmy communities and discussions
+Type=Application
+Exec=cosmic-ext-lemmy
+Icon=io.github.cosmic_utils.cosmic_ext_lemmy
+Terminal=false
+Categories=Network;News;
+Keywords=Lemmy;Fediverse;COSMIC;
+StartupNotify=true
