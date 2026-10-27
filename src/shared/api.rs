@@ -1,4 +1,4 @@
-use reqwest::Client;
+use reqwest::{Client, Method};
 use serde::{Serialize, de::DeserializeOwned};
 use std::time::Duration;
 use url::Url;
@@ -32,8 +32,35 @@ impl Api {
         self.token = Some(token);
         self
     }
+
+    pub fn is_authenticated(&self) -> bool {
+        self.token.is_some()
+    }
+
+    pub fn into_anonymous(mut self) -> Self {
+        self.token = None;
+        self
+    }
+
     pub async fn post<Q: Serialize, R: DeserializeOwned>(
         &self,
+        endpoint: &str,
+        body: &Q,
+    ) -> Result<R, String> {
+        self.write(Method::POST, endpoint, body).await
+    }
+
+    pub async fn put<Q: Serialize, R: DeserializeOwned>(
+        &self,
+        endpoint: &str,
+        body: &Q,
+    ) -> Result<R, String> {
+        self.write(Method::PUT, endpoint, body).await
+    }
+
+    async fn write<Q: Serialize, R: DeserializeOwned>(
+        &self,
+        method: Method,
         endpoint: &str,
         body: &Q,
     ) -> Result<R, String> {
@@ -41,7 +68,7 @@ impl Api {
             .base
             .join(&format!("api/v3/{endpoint}"))
             .map_err(|e| e.to_string())?;
-        let mut request = self.http.post(url).json(body);
+        let mut request = self.http.request(method, url).json(body);
         if let Some(token) = &self.token {
             request = request.bearer_auth(token);
         }
@@ -51,7 +78,7 @@ impl Api {
             .map_err(|_| "Could not reach instance".to_string())?;
         if !response.status().is_success() {
             return Err(format!(
-                "Request failed (HTTP {}). Check credentials, two-factor code, or session.",
+                "The instance rejected the request (HTTP {}).",
                 response.status()
             ));
         }
@@ -131,9 +158,9 @@ impl std::fmt::Debug for Api {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
     #[test]
     fn normalizes_instance_and_rejects_non_instance_urls() {
@@ -157,7 +184,7 @@ mod tests {
         }
     }
 
-    async fn serve(status: &str, body: &str) -> (Api, tokio::task::JoinHandle<String>) {
+    pub(crate) async fn serve(status: &str, body: &str) -> (Api, tokio::task::JoinHandle<String>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let api = Api::new(
             http_client().unwrap(),
@@ -169,11 +196,25 @@ mod tests {
             body.len()
         );
         let handle = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = vec![0; 8192];
-            let count = socket.read(&mut request).await.unwrap();
-            socket.write_all(reply.as_bytes()).await.unwrap();
-            String::from_utf8_lossy(&request[..count]).into_owned()
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            let mut headers = String::new();
+            let mut content_length = 0;
+            loop {
+                let mut line = String::new();
+                assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+                headers.push_str(&line);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(length) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = length.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; content_length];
+            socket.read_exact(&mut body).await.unwrap();
+            socket.get_mut().write_all(reply.as_bytes()).await.unwrap();
+            headers + std::str::from_utf8(&body).unwrap()
         });
         (api, handle)
     }

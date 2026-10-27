@@ -1,4 +1,5 @@
-use super::{Message, Post, thread};
+use super::{Action, Message, Post, thread};
+use crate::shared::api::Api;
 use cosmic::{
     Element,
     iced::{Length, Padding},
@@ -18,7 +19,7 @@ fn render_markdown(content: &markdown::Content) -> Element<'_, Message> {
 }
 
 impl Post {
-    pub fn view(&self) -> Element<'_, Message> {
+    pub fn view(&self, account_busy: bool) -> Element<'_, Message> {
         let Some(post) = &self.selected else {
             return widget::text::body("Select a post to read.").into();
         };
@@ -29,6 +30,39 @@ impl Post {
                 "!{} · by {} · {} points · {} comments",
                 post.community.name, post.creator.name, post.counts.score, post.counts.comments
             )));
+        if self.api.as_ref().is_some_and(Api::is_authenticated) {
+            let enabled = !account_busy && self.pending_action.is_none();
+            let message = |action| enabled.then_some(Message::Act(self.generation, action));
+            let upvote = if post.my_vote == Some(1) {
+                "Upvoted ✓"
+            } else {
+                "Upvote"
+            };
+            let downvote = if post.my_vote == Some(-1) {
+                "Downvoted ✓"
+            } else {
+                "Downvote"
+            };
+            let save = if post.saved { "Unsave" } else { "Save" };
+            content = content.push(
+                widget::row::with_capacity(3)
+                    .spacing(8)
+                    .push(widget::button::standard(upvote).on_press_maybe(message(Action::Upvote)))
+                    .push(
+                        widget::button::standard(downvote)
+                            .on_press_maybe(message(Action::Downvote)),
+                    )
+                    .push(
+                        widget::button::standard(save).on_press_maybe(message(Action::ToggleSaved)),
+                    ),
+            );
+            if self.pending_action.is_some() {
+                content = content.push(widget::text::caption("Updating post…"));
+            }
+            if let Some(error) = &self.action_error {
+                content = content.push(widget::text::body(error));
+            }
+        }
         if let Some(url) = &post.post.url {
             content = content.push(
                 widget::button::link(url.to_string()).on_press(Message::Link(url.to_string())),

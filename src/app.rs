@@ -96,8 +96,18 @@ impl cosmic::Application for App {
                 cosmic::iced::Task::batch(tasks)
             }
             Message::Post(post::Message::Back) => {
-                self.post.reset();
+                self.post.close();
                 Task::none()
+            }
+            Message::Post(post::Message::Act(..)) if self.accounts.busy => Task::none(),
+            Message::Post(post::Message::ActionFinished(generation, result)) => {
+                if let Some(updated) = self.post.finish_action(generation, result) {
+                    self.feed
+                        .apply_post_update(updated)
+                        .map(|m| cosmic::Action::App(Message::Feed(m)))
+                } else {
+                    Task::none()
+                }
             }
             Message::Post(message) => self
                 .post
@@ -108,7 +118,7 @@ impl cosmic::Application for App {
 
     fn view(&self) -> Element<'_, Message> {
         let content = if self.post.selected.is_some() {
-            self.post.view().map(Message::Post)
+            self.post.view(self.accounts.busy).map(Message::Post)
         } else {
             self.feed.view().map(Message::Feed)
         };

@@ -151,6 +151,16 @@ impl Feed {
     pub fn api(&self) -> Option<Api> {
         self.api.clone()
     }
+
+    pub fn apply_post_update(&mut self, updated: PostView) -> Task<Message> {
+        if let Some(post) = self.posts.iter_mut().find(|p| p.post.id == updated.post.id) {
+            *post = updated;
+        } else if self.busy && !self.loaded {
+            // A refresh started before the write finished. Fetch its first page again.
+            return self.reload();
+        }
+        Task::none()
+    }
 }
 
 #[cfg(test)]

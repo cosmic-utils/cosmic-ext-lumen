@@ -175,9 +175,8 @@ impl Accounts {
             }
             Message::Anonymous if !self.busy => {
                 self.registry.active = None;
-                self.session = None;
                 self.error = storage::save(&self.registry).err();
-                return (Task::none(), Api::new(self.http.clone(), instance).ok());
+                return (Task::none(), self.leave_session(instance));
             }
             Message::Remove if !self.busy => {
                 if let Some(id) = self.registry.active.clone() {
@@ -206,13 +205,12 @@ impl Accounts {
                 self.busy = false;
                 match result {
                     Ok(warning) => {
-                        self.session = None;
                         let id = self.registry.active.take();
                         self.registry
                             .accounts
                             .retain(|a| Some(&a.id) != id.as_ref());
                         self.error = storage::save(&self.registry).err().or(warning);
-                        return (Task::none(), Api::new(self.http.clone(), instance).ok());
+                        return (Task::none(), self.leave_session(instance));
                     }
                     Err(e) => self.error = Some(e),
                 }
@@ -221,6 +219,14 @@ impl Accounts {
         }
         (Task::none(), None)
     }
+
+    fn leave_session(&mut self, instance: &str) -> Option<Api> {
+        let previous = self.session.take();
+        Api::new(self.http.clone(), instance)
+            .ok()
+            .or_else(|| previous.map(Api::into_anonymous))
+    }
+
     pub fn view(&self) -> Element<'_, Message> {
         let mut content = widget::column::with_capacity(5).spacing(8);
         let mut picker = widget::row::with_capacity(self.registry.accounts.len() + 2).spacing(8);
