@@ -195,13 +195,13 @@ impl Post {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::shared::api::tests::serve;
     use cosmic::iced::{futures::StreamExt, runtime};
     use serde_json::{Value, json};
 
-    fn post_view() -> PostView {
+    pub(crate) fn post_view() -> PostView {
         let published = "2024-01-01T00:00:00Z";
         serde_json::from_value(json!({
             "post": {

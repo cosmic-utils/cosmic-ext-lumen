@@ -1,32 +1,32 @@
-use super::{Feed, Message, Sort};
+use super::{Feed, Message, Scope, Sort};
 use cosmic::{Element, iced::Length, widget};
 
 impl Feed {
     pub fn view(&self) -> Element<'_, Message> {
-        let mut controls = widget::row::with_capacity(5)
+        let mut controls = widget::row::with_capacity(7)
             .spacing(8)
             .push(widget::text::title2("Discover"))
             .push(widget::dropdown(
                 Sort::LABELS.as_slice(),
                 Some(self.sort.index()),
                 Message::Sort,
-            ))
-            .push(
-                widget::button::text(if self.local { "Local ✓" } else { "Local" })
-                    .on_press(Message::Scope(true)),
-            )
-            .push(
-                widget::button::text(if self.local { "All" } else { "All ✓" })
-                    .on_press(Message::Scope(false)),
-            );
-        controls = controls.push(
-            widget::button::text(if self.subscribed {
-                "Subscribed ✓"
-            } else {
-                "Subscribed"
-            })
-            .on_press(Message::Subscribed),
-        );
+            ));
+        for (scope, label) in [
+            (Scope::Local, "Local"),
+            (Scope::All, "All"),
+            (Scope::Subscribed, "Subscribed"),
+            (Scope::Saved, "Saved"),
+        ] {
+            if scope != Scope::Saved || self.can_view_saved() {
+                let label = if self.scope == scope {
+                    format!("{label} ✓")
+                } else {
+                    label.to_owned()
+                };
+                controls =
+                    controls.push(widget::button::text(label).on_press(Message::Scope(scope)));
+            }
+        }
         let mut refresh = widget::button::standard("Refresh");
         if !self.busy {
             refresh = refresh.on_press(Message::Refresh);
@@ -39,6 +39,8 @@ impl Feed {
         if self.posts.is_empty() {
             content = content.push(widget::text::body(if self.busy {
                 "Loading posts…"
+            } else if self.loaded && self.scope == Scope::Saved {
+                "No saved posts."
             } else if self.loaded {
                 "No posts found in this feed."
             } else {
