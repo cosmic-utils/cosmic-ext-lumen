@@ -31,7 +31,7 @@ impl Post {
                 post.community.name, post.creator.name, post.counts.score, post.counts.comments
             )));
         if self.api.as_ref().is_some_and(Api::is_authenticated) {
-            let enabled = !account_busy && self.pending_action.is_none();
+            let enabled = !account_busy && self.pending_action.is_none() && !self.submitting;
             let message = |action| enabled.then_some(Message::Act(self.generation, action));
             let upvote = if post.my_vote == Some(1) {
                 "Upvoted ✓"
@@ -80,6 +80,30 @@ impl Post {
             );
         }
         content = content.push(widget::text::title2("Comments"));
+        if self.api.as_ref().is_some_and(Api::is_authenticated) {
+            let generation = self.generation;
+            let mut editor = widget::text_editor::TextEditor::new(&self.draft)
+                .placeholder("Write a comment")
+                .height(Length::Fixed(100.0));
+            if !self.submitting {
+                editor = editor.on_action(move |action| Message::EditComment(generation, action));
+            }
+            let can_submit = !account_busy
+                && !self.submitting
+                && self.pending_action.is_none()
+                && !self.draft.text().trim().is_empty();
+            content = content.push(editor).push(
+                widget::button::suggested(if self.submitting {
+                    "Posting…"
+                } else {
+                    "Post comment"
+                })
+                .on_press_maybe(can_submit.then_some(Message::SubmitComment(generation))),
+            );
+            if let Some(error) = &self.submit_error {
+                content = content.push(widget::text::body(error));
+            }
+        }
         if let Some(error) = &self.error {
             content = content
                 .push(widget::text::body(error))

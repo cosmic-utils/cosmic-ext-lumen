@@ -99,7 +99,17 @@ impl cosmic::Application for App {
                 self.post.close();
                 Task::none()
             }
-            Message::Post(post::Message::Act(..)) if self.accounts.busy => Task::none(),
+            Message::Post(post::Message::Act(..) | post::Message::SubmitComment(..))
+                if self.accounts.busy =>
+            {
+                Task::none()
+            }
+            Message::Post(post::Message::CommentSubmitted(generation, result)) => {
+                if let Some(id) = self.post.finish_comment(generation, result) {
+                    self.feed.comment_added(id);
+                }
+                Task::none()
+            }
             Message::Post(post::Message::ActionFinished(generation, result)) => {
                 if let Some(updated) = self.post.finish_action(generation, result) {
                     self.feed

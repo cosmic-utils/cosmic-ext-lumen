@@ -5,7 +5,7 @@ mod view;
 use crate::shared::api::Api;
 use cosmic::iced::Task;
 use lemmy_api_common::{
-    lemmy_db_schema::SortType,
+    lemmy_db_schema::{SortType, newtypes::PostId},
     lemmy_db_views::structs::{PaginationCursor, PostView},
     post::GetPostsResponse,
 };
@@ -158,6 +158,12 @@ impl Feed {
 
     pub fn api(&self) -> Option<Api> {
         self.api.clone()
+    }
+
+    pub fn comment_added(&mut self, id: PostId) {
+        if let Some(post) = self.posts.iter_mut().find(|post| post.post.id == id) {
+            post.counts.comments += 1;
+        }
     }
 
     pub fn apply_post_update(&mut self, updated: PostView) -> Task<Message> {

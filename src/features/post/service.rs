@@ -1,13 +1,35 @@
 use super::Action;
 use crate::shared::api::Api;
 use lemmy_api_common::{
-    comment::{GetComments, GetCommentsResponse},
+    comment::{CommentResponse, CreateComment, GetComments, GetCommentsResponse},
     lemmy_db_schema::{CommentSortType, newtypes::PostId},
-    lemmy_db_views::structs::PostView,
+    lemmy_db_views::structs::{CommentView, PostView},
     post::{CreatePostLike, PostResponse, SavePost},
 };
 
 pub const PAGE_SIZE: usize = 50;
+
+pub async fn create_comment(
+    api: Api,
+    post_id: PostId,
+    content: String,
+) -> Result<CommentView, String> {
+    let response: CommentResponse = api
+        .post(
+            "comment",
+            &CreateComment {
+                content,
+                post_id,
+                parent_id: None,
+                language_id: None,
+            },
+        )
+        .await?;
+    if response.comment_view.comment.post_id != post_id {
+        return Err("The instance returned a comment for a different post.".into());
+    }
+    Ok(response.comment_view)
+}
 
 pub async fn act(api: Api, post: &PostView, action: Action) -> Result<PostView, String> {
     let post_id = post.post.id;
