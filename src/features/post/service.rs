@@ -1,4 +1,4 @@
-use super::Action;
+use super::{Action, CommentTarget};
 use crate::shared::api::Api;
 use lemmy_api_common::{
     comment::{CommentResponse, CreateComment, GetComments, GetCommentsResponse},
@@ -12,21 +12,38 @@ pub const PAGE_SIZE: usize = 50;
 pub async fn create_comment(
     api: Api,
     post_id: PostId,
+    target: CommentTarget,
     content: String,
 ) -> Result<CommentView, String> {
+    let parent_id = match target {
+        CommentTarget::Post => None,
+        CommentTarget::Reply(id) => Some(id),
+    };
     let response: CommentResponse = api
         .post(
             "comment",
             &CreateComment {
                 content,
                 post_id,
-                parent_id: None,
+                parent_id,
                 language_id: None,
             },
         )
         .await?;
     if response.comment_view.comment.post_id != post_id {
         return Err("The instance returned a comment for a different post.".into());
+    }
+    if let Some(parent_id) = parent_id
+        && response
+            .comment_view
+            .comment
+            .path
+            .rsplit('.')
+            .nth(1)
+            .and_then(|id| id.parse().ok())
+            != Some(parent_id.0)
+    {
+        return Err("The instance returned a reply to a different comment.".into());
     }
     Ok(response.comment_view)
 }

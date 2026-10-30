@@ -10,15 +10,27 @@ use cosmic::{
 };
 use lemmy_api_common::{
     comment::GetCommentsResponse,
-    lemmy_db_schema::newtypes::PostId,
+    lemmy_db_schema::newtypes::{CommentId, PostId},
     lemmy_db_views::structs::{CommentView, PostView},
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub struct Comment {
     pub data: CommentView,
     pub body: markdown::Content,
     pub path: Vec<i32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommentTarget {
+    Post,
+    Reply(CommentId),
+}
+
+#[derive(Default)]
+struct Composer {
+    draft: text_editor::Content<cosmic::Renderer>,
+    error: Option<String>,
 }
 
 #[derive(Default)]
@@ -35,9 +47,10 @@ pub struct Post {
     api: Option<Api>,
     pending_action: Option<(u64, PostId)>,
     action_error: Option<String>,
-    draft: text_editor::Content<cosmic::Renderer>,
-    submitting: bool,
-    submit_error: Option<String>,
+    composer: Composer,
+    replies: HashMap<CommentId, Composer>,
+    active_reply: Option<CommentId>,
+    submitting: Option<CommentTarget>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -57,8 +70,10 @@ pub enum Message {
     Loaded(u64, Result<GetCommentsResponse, String>),
     Act(u64, Action),
     ActionFinished(u64, Result<Box<PostView>, String>),
-    EditComment(u64, text_editor::Action),
-    SubmitComment(u64),
+    OpenReply(u64, CommentId),
+    CancelReply(u64, CommentId),
+    EditComment(u64, CommentTarget, text_editor::Action),
+    SubmitComment(u64, CommentTarget),
     CommentSubmitted(u64, Result<Box<CommentView>, String>),
 }
 
@@ -87,9 +102,10 @@ impl Post {
         self.more = false;
         self.error = None;
         self.action_error = None;
-        self.draft = text_editor::Content::new();
-        self.submitting = false;
-        self.submit_error = None;
+        self.composer = Composer::default();
+        self.replies.clear();
+        self.active_reply = None;
+        self.submitting = None;
     }
 
     fn set_selected(&mut self, post: PostView) {
@@ -98,7 +114,10 @@ impl Post {
     }
 
     fn act(&mut self, generation: u64, action: Action) -> Task<Message> {
-        if generation != self.generation || self.pending_action.is_some() || self.submitting {
+        if generation != self.generation
+            || self.pending_action.is_some()
+            || self.submitting.is_some()
+        {
             return Task::none();
         }
         let (Some(api), Some(post)) = (&self.api, &self.selected) else {
@@ -116,21 +135,39 @@ impl Post {
         )
     }
 
-    fn submit_comment(&mut self, generation: u64) -> Task<Message> {
-        if generation != self.generation || self.submitting || self.pending_action.is_some() {
+    fn composer_mut(&mut self, target: CommentTarget) -> Option<&mut Composer> {
+        match target {
+            CommentTarget::Post => Some(&mut self.composer),
+            CommentTarget::Reply(id) if self.active_reply == Some(id) => self.replies.get_mut(&id),
+            CommentTarget::Reply(_) => None,
+        }
+    }
+
+    fn submit_comment(&mut self, generation: u64, target: CommentTarget) -> Task<Message> {
+        if generation != self.generation
+            || self.submitting.is_some()
+            || self.pending_action.is_some()
+        {
             return Task::none();
         }
         let (Some(api), Some(post)) = (&self.api, &self.selected) else {
             return Task::none();
         };
-        let content = self.draft.text();
-        if !api.is_authenticated() || content.trim().is_empty() {
+        if !api.is_authenticated() {
             return Task::none();
         }
-        self.submitting = true;
-        self.submit_error = None;
+        let (api, post_id) = (api.clone(), post.post.id);
+        let Some(composer) = self.composer_mut(target) else {
+            return Task::none();
+        };
+        let content = composer.draft.text();
+        if content.trim().is_empty() {
+            return Task::none();
+        }
+        composer.error = None;
+        self.submitting = Some(target);
         Task::perform(
-            service::create_comment(api.clone(), post.post.id, content),
+            service::create_comment(api, post_id, target, content),
             move |result| Message::CommentSubmitted(generation, result.map(Box::new)),
         )
     }
@@ -140,13 +177,25 @@ impl Post {
         generation: u64,
         result: Result<Box<CommentView>, String>,
     ) -> Option<PostId> {
-        if generation != self.generation || !self.submitting {
+        if generation != self.generation {
             return None;
         }
-        self.submitting = false;
+        let target = self.submitting.take()?;
         match result {
             Ok(comment) => {
-                self.draft = text_editor::Content::new();
+                match target {
+                    CommentTarget::Post => self.composer = Composer::default(),
+                    CommentTarget::Reply(id) => {
+                        self.replies.remove(&id);
+                        self.active_reply = None;
+                        for ancestor in thread::path_ids(&comment.comment.path)
+                            .into_iter()
+                            .take_while(|ancestor| *ancestor != comment.comment.id.0)
+                        {
+                            self.collapsed.remove(&ancestor);
+                        }
+                    }
+                }
                 self.add_comment(*comment);
                 self.comments.sort_by(|a, b| a.path.cmp(&b.path));
                 let post = self.selected.as_mut()?;
@@ -154,7 +203,9 @@ impl Post {
                 Some(post.post.id)
             }
             Err(error) => {
-                self.submit_error = Some(error);
+                if let Some(composer) = self.composer_mut(target) {
+                    composer.error = Some(error);
+                }
                 None
             }
         }
@@ -222,12 +273,36 @@ impl Post {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Act(generation, action) => return self.act(generation, action),
-            Message::EditComment(generation, action)
-                if generation == self.generation && !self.submitting =>
+            Message::OpenReply(generation, id)
+                if generation == self.generation
+                    && self.submitting.is_none()
+                    && self.api.as_ref().is_some_and(Api::is_authenticated)
+                    && self
+                        .comments
+                        .iter()
+                        .any(|comment| comment.data.comment.id == id) =>
             {
-                self.draft.perform(action);
+                self.replies.entry(id).or_default();
+                self.active_reply = Some(id);
             }
-            Message::SubmitComment(generation) => return self.submit_comment(generation),
+            Message::CancelReply(generation, id)
+                if generation == self.generation
+                    && self.submitting.is_none()
+                    && self.active_reply == Some(id) =>
+            {
+                self.replies.remove(&id);
+                self.active_reply = None;
+            }
+            Message::EditComment(generation, target, action)
+                if generation == self.generation && self.submitting != Some(target) =>
+            {
+                if let Some(composer) = self.composer_mut(target) {
+                    composer.draft.perform(action);
+                }
+            }
+            Message::SubmitComment(generation, target) => {
+                return self.submit_comment(generation, target);
+            }
             Message::More if !self.busy && self.more => return self.load(),
             Message::Retry if !self.busy => return self.load(),
             Message::Collapse(id) => {
@@ -321,6 +396,89 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn reply_uses_the_selected_parent_and_preserves_draft_on_failure() {
+        let previous = post_view();
+        let parent = comment_view(&previous, "Parent comment");
+        let parent_id = parent.comment.id;
+        let mut sibling = parent.clone();
+        sibling.comment.id = CommentId(43);
+        sibling.comment.path = "0.43".into();
+        let mut reply = comment_view(&previous, "My reply");
+        reply.comment.id = CommentId(44);
+        reply.comment.path = "0.42.44".into();
+        reply.counts.comment_id = reply.comment.id;
+        let body = json!({"comment_view": reply, "recipient_ids": []}).to_string();
+
+        for success in [true, false] {
+            let status = if success { "200 OK" } else { "403 Forbidden" };
+            let (api, request) = serve(status, &body).await;
+            let mut post = Post::default();
+            let _ = post.open(api.authenticated("reply-account".into()), previous.clone());
+            post.add_comment(parent.clone());
+            post.add_comment(sibling.clone());
+            post.composer.draft = text_editor::Content::with_text("Top-level draft");
+            let generation = post.generation;
+            let _ = post.update(Message::OpenReply(generation, parent_id));
+            let target = CommentTarget::Reply(parent_id);
+            let _ = post.update(Message::EditComment(
+                generation,
+                target,
+                text_editor::Action::Edit(text_editor::Edit::Paste("My reply".to_owned().into())),
+            ));
+            let _ = post.update(Message::OpenReply(generation, sibling.comment.id));
+            assert!(post.replies[&sibling.comment.id].draft.text().is_empty());
+            assert!(
+                runtime::task::into_stream(post.update(Message::SubmitComment(generation, target)))
+                    .is_none()
+            );
+            let _ = post.update(Message::OpenReply(generation, parent_id));
+            let mut task =
+                runtime::task::into_stream(post.update(Message::SubmitComment(generation, target)))
+                    .unwrap();
+            assert_eq!(post.comments.len(), 2);
+            let _ = post.update(Message::Collapse(parent_id.0));
+            let Some(runtime::Action::Output(Message::CommentSubmitted(generation, result))) =
+                task.next().await
+            else {
+                panic!("reply submission did not finish");
+            };
+            let updated = post.finish_comment(generation, result);
+            assert_eq!(post.composer.draft.text(), "Top-level draft");
+            if success {
+                assert_eq!(updated, Some(previous.post.id));
+                assert_eq!(post.comments[1].path, vec![42, 44]);
+                assert!(!thread::hidden(&post.comments[1].path, &post.collapsed));
+                assert!(!post.replies.contains_key(&parent_id));
+                assert!(post.active_reply.is_none());
+            } else {
+                assert!(updated.is_none());
+                assert_eq!(post.comments.len(), 2);
+                assert_eq!(post.replies[&parent_id].draft.text(), "My reply");
+                assert!(
+                    post.replies[&parent_id]
+                        .error
+                        .as_deref()
+                        .unwrap()
+                        .contains("403")
+                );
+            }
+            let request = request.await.unwrap();
+            let (headers, payload) = request.split_once("\r\n\r\n").unwrap();
+            assert!(
+                headers
+                    .lines()
+                    .any(|line| line == "authorization: Bearer reply-account")
+            );
+            assert_eq!(
+                serde_json::from_str::<Value>(payload).unwrap(),
+                json!({
+                    "post_id": 17, "parent_id": 42, "content": "My reply"
+                })
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn comment_submission_uses_selected_account_and_preserves_rejected_draft() {
         let text = "Hello\n\n**Lemmy**";
         let previous = post_view();
@@ -344,23 +502,30 @@ pub(crate) mod tests {
                 previous.clone(),
             );
             let generation = post.generation;
-            post.draft = text_editor::Content::with_text("   ");
+            post.composer.draft = text_editor::Content::with_text("   ");
             assert!(
-                runtime::task::into_stream(post.update(Message::SubmitComment(generation)))
-                    .is_none()
+                runtime::task::into_stream(
+                    post.update(Message::SubmitComment(generation, CommentTarget::Post))
+                )
+                .is_none()
             );
-            post.draft = text_editor::Content::with_text(text);
+            post.composer.draft = text_editor::Content::with_text(text);
             assert!(
-                runtime::task::into_stream(post.update(Message::SubmitComment(old_generation)))
-                    .is_none()
+                runtime::task::into_stream(
+                    post.update(Message::SubmitComment(old_generation, CommentTarget::Post))
+                )
+                .is_none()
             );
-            let mut task =
-                runtime::task::into_stream(post.update(Message::SubmitComment(generation)))
-                    .unwrap();
+            let mut task = runtime::task::into_stream(
+                post.update(Message::SubmitComment(generation, CommentTarget::Post)),
+            )
+            .unwrap();
             assert!(post.comments.is_empty());
             assert!(
-                runtime::task::into_stream(post.update(Message::SubmitComment(generation)))
-                    .is_none()
+                runtime::task::into_stream(
+                    post.update(Message::SubmitComment(generation, CommentTarget::Post))
+                )
+                .is_none()
             );
             let Some(runtime::Action::Output(Message::CommentSubmitted(generation, result))) =
                 task.next().await
@@ -372,19 +537,19 @@ pub(crate) mod tests {
                     .is_none()
             );
             let updated = post.finish_comment(generation, result);
-            assert!(!post.submitting);
+            assert!(post.submitting.is_none());
             if success {
                 assert_eq!(updated, Some(previous.post.id));
                 assert_eq!(post.comments.len(), 1);
                 assert_eq!(post.comments[0].data.comment.content, text);
                 assert_eq!(post.selected.as_ref().unwrap().counts.comments, 1);
-                assert!(post.draft.text().is_empty());
+                assert!(post.composer.draft.text().is_empty());
             } else {
                 assert!(updated.is_none());
                 assert!(post.comments.is_empty());
                 assert_eq!(post.selected.as_ref(), Some(&previous));
-                assert_eq!(post.draft.text(), text);
-                assert!(post.submit_error.as_deref().unwrap().contains("403"));
+                assert_eq!(post.composer.draft.text(), text);
+                assert!(post.composer.error.as_deref().unwrap().contains("403"));
             }
             let request = request.await.unwrap();
             let (headers, payload) = request.split_once("\r\n\r\n").unwrap();

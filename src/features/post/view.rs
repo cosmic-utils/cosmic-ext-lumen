@@ -1,4 +1,4 @@
-use super::{Action, Message, Post, thread};
+use super::{Action, CommentTarget, Composer, Message, Post, thread};
 use crate::shared::api::Api;
 use cosmic::{
     Element,
@@ -19,6 +19,52 @@ fn render_markdown(content: &markdown::Content) -> Element<'_, Message> {
 }
 
 impl Post {
+    fn comment_composer<'a>(
+        &self,
+        composer: &'a Composer,
+        target: CommentTarget,
+        account_busy: bool,
+    ) -> Element<'a, Message> {
+        let generation = self.generation;
+        let submitting = self.submitting == Some(target);
+        let (placeholder, label) = match target {
+            CommentTarget::Post => ("Write a comment", "Post comment"),
+            CommentTarget::Reply(_) => ("Write a reply", "Post reply"),
+        };
+        let mut editor = widget::text_editor::TextEditor::new(&composer.draft)
+            .placeholder(placeholder)
+            .height(Length::Fixed(100.0));
+        if !submitting {
+            editor =
+                editor.on_action(move |action| Message::EditComment(generation, target, action));
+        }
+        let can_submit = !account_busy
+            && self.submitting.is_none()
+            && self.pending_action.is_none()
+            && !composer.draft.text().trim().is_empty();
+        let mut buttons = widget::row::with_capacity(2).spacing(8).push(
+            widget::button::suggested(if submitting { "Posting…" } else { label })
+                .on_press_maybe(can_submit.then_some(Message::SubmitComment(generation, target))),
+        );
+        if let CommentTarget::Reply(id) = target {
+            buttons = buttons.push(
+                widget::button::standard("Cancel").on_press_maybe(
+                    self.submitting
+                        .is_none()
+                        .then_some(Message::CancelReply(generation, id)),
+                ),
+            );
+        }
+        let mut content = widget::column::with_capacity(3)
+            .spacing(8)
+            .push(editor)
+            .push(buttons);
+        if let Some(error) = &composer.error {
+            content = content.push(widget::text::body(error));
+        }
+        content.into()
+    }
+
     pub fn view(&self, account_busy: bool) -> Element<'_, Message> {
         let Some(post) = &self.selected else {
             return widget::text::body("Select a post to read.").into();
@@ -30,8 +76,10 @@ impl Post {
                 "!{} · by {} · {} points · {} comments",
                 post.community.name, post.creator.name, post.counts.score, post.counts.comments
             )));
-        if self.api.as_ref().is_some_and(Api::is_authenticated) {
-            let enabled = !account_busy && self.pending_action.is_none() && !self.submitting;
+        let signed_in = self.api.as_ref().is_some_and(Api::is_authenticated);
+        if signed_in {
+            let enabled =
+                !account_busy && self.pending_action.is_none() && self.submitting.is_none();
             let message = |action| enabled.then_some(Message::Act(self.generation, action));
             let upvote = if post.my_vote == Some(1) {
                 "Upvoted ✓"
@@ -80,29 +128,12 @@ impl Post {
             );
         }
         content = content.push(widget::text::title2("Comments"));
-        if self.api.as_ref().is_some_and(Api::is_authenticated) {
-            let generation = self.generation;
-            let mut editor = widget::text_editor::TextEditor::new(&self.draft)
-                .placeholder("Write a comment")
-                .height(Length::Fixed(100.0));
-            if !self.submitting {
-                editor = editor.on_action(move |action| Message::EditComment(generation, action));
-            }
-            let can_submit = !account_busy
-                && !self.submitting
-                && self.pending_action.is_none()
-                && !self.draft.text().trim().is_empty();
-            content = content.push(editor).push(
-                widget::button::suggested(if self.submitting {
-                    "Posting…"
-                } else {
-                    "Post comment"
-                })
-                .on_press_maybe(can_submit.then_some(Message::SubmitComment(generation))),
-            );
-            if let Some(error) = &self.submit_error {
-                content = content.push(widget::text::body(error));
-            }
+        if signed_in {
+            content = content.push(self.comment_composer(
+                &self.composer,
+                CommentTarget::Post,
+                account_busy,
+            ));
         }
         if let Some(error) = &self.error {
             content = content
@@ -128,6 +159,27 @@ impl Post {
             );
             if !collapsed {
                 row = row.push(render_markdown(&comment.body));
+                if signed_in {
+                    let id = comment.data.comment.id;
+                    if let Some(composer) = self
+                        .replies
+                        .get(&id)
+                        .filter(|_| self.active_reply == Some(id))
+                    {
+                        row = row.push(self.comment_composer(
+                            composer,
+                            CommentTarget::Reply(id),
+                            account_busy,
+                        ));
+                    } else {
+                        row = row.push(
+                            widget::button::text("Reply").on_press_maybe(
+                                (!account_busy && self.submitting.is_none())
+                                    .then_some(Message::OpenReply(self.generation, id)),
+                            ),
+                        );
+                    }
+                }
             }
             content = content.push(
                 widget::container(row)

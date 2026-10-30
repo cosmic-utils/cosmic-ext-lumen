@@ -20,7 +20,7 @@ Enter a Lemmy instance hostname or root URL and select **Connect**. The last suc
 - Cursor pagination and duplicate post suppression.
 - Post bodies and comments rendered as Markdown.
 - Numerically ordered, collapsible comment threads; load additional comments in batches of 50.
-- Write top-level comments with Markdown while signed in.
+- Write Markdown comments and threaded replies while signed in.
 - Request timeouts, retryable errors, and stale-response protection when navigating.
 - System theme, native widgets, browser links, and a saved instance preference.
 
