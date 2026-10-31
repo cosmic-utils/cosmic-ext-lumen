@@ -396,6 +396,37 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn opening_a_post_loads_its_thread_without_the_default_feed_scope() {
+        let mut selected = post_view();
+        selected.post.local = false;
+        selected.community.local = false;
+        let comment = comment_view(&selected, "Federated comment");
+        let body = json!({"comments": [comment]}).to_string();
+        let (api, request) = serve("200 OK", &body).await;
+        let mut post = Post::default();
+        let mut task = runtime::task::into_stream(
+            post.open(api.authenticated("local-feed-account".into()), selected),
+        )
+        .unwrap();
+        let Some(runtime::Action::Output(message @ Message::Loaded(..))) = task.next().await else {
+            panic!("comment loading did not finish");
+        };
+        let _ = post.update(message);
+
+        assert!(!post.busy);
+        assert!(post.error.is_none());
+        assert_eq!(post.comments.len(), 1);
+        assert_eq!(post.comments[0].data.comment.content, "Federated comment");
+
+        let request = request.await.unwrap();
+        let target = request.split_whitespace().nth(1).unwrap();
+        let (path, query) = target.split_once('?').unwrap();
+        assert_eq!(path, "/api/v3/comment/list");
+        assert!(query.split('&').any(|param| param == "type_=All"));
+        assert!(query.split('&').any(|param| param == "post_id=17"));
+    }
+
+    #[tokio::test]
     async fn reply_uses_the_selected_parent_and_preserves_draft_on_failure() {
         let previous = post_view();
         let parent = comment_view(&previous, "Parent comment");

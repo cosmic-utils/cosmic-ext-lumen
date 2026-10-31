@@ -2,7 +2,7 @@ use super::{Action, CommentTarget};
 use crate::shared::api::Api;
 use lemmy_api_common::{
     comment::{CommentResponse, CreateComment, GetComments, GetCommentsResponse},
-    lemmy_db_schema::{CommentSortType, newtypes::PostId},
+    lemmy_db_schema::{CommentSortType, ListingType, newtypes::PostId},
     lemmy_db_views::structs::{CommentView, PostView},
     post::{CreatePostLike, PostResponse, SavePost},
 };
@@ -83,6 +83,8 @@ pub async fn comments(api: Api, post: i32, page: i64) -> Result<GetCommentsRespo
         "comment/list",
         &GetComments {
             post_id: Some(PostId(post)),
+            // A post's thread should be visible regardless of the default feed scope.
+            type_: Some(ListingType::All),
             sort: Some(CommentSortType::Old),
             page: Some(page),
             limit: Some(PAGE_SIZE as i64),

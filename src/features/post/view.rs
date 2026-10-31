@@ -3,6 +3,7 @@ use crate::shared::api::Api;
 use cosmic::{
     Element,
     iced::{Length, Padding},
+    theme::Container,
     widget::{self, markdown},
 };
 
@@ -117,17 +118,21 @@ impl Post {
             );
         }
         content = content.push(render_markdown(&self.body));
+        let mut discussion = widget::row::with_capacity(2)
+            .spacing(12)
+            .align_y(cosmic::iced::Alignment::Center)
+            .push(widget::text::title2("Comments"));
         if let Some(url) = self
             .api
             .as_ref()
             .and_then(|api| api.base.join(&format!("post/{}", post.post.id.0)).ok())
         {
-            content = content.push(
+            discussion = discussion.push(
                 widget::button::text("Open discussion in browser")
                     .on_press(Message::Link(url.to_string())),
             );
         }
-        content = content.push(widget::text::title2("Comments"));
+        content = content.push(discussion);
         if signed_in {
             content = content.push(self.comment_composer(
                 &self.composer,
@@ -181,16 +186,16 @@ impl Post {
                     }
                 }
             }
-            content = content.push(
-                widget::container(row)
-                    .padding(Padding {
-                        top: 8.0,
-                        right: 8.0,
-                        bottom: 8.0,
-                        left: 12.0 + comment.path.len().saturating_sub(1).min(8) as f32 * 16.0,
-                    })
-                    .width(Length::Fill),
-            );
+            let indent = comment.path.len().saturating_sub(1).min(8) as f32 * 16.0;
+            let card = widget::container(row)
+                .class(Container::Card)
+                .padding([12, 16])
+                .width(Length::Fill);
+            content = content.push(widget::container(card).padding(Padding {
+                right: 8.0,
+                left: indent,
+                ..Padding::ZERO
+            }));
         }
         if self.busy {
             content = content.push(widget::text::body("Loading comments…"));
