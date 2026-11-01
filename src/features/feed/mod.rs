@@ -1,11 +1,15 @@
 //! Post feeds, sorting, pagination, and selection.
 mod service;
 mod view;
+pub use view::SCROLL_ID;
 
 use crate::shared::api::Api;
 use cosmic::iced::Task;
 use lemmy_api_common::{
-    lemmy_db_schema::{SortType, newtypes::PostId},
+    lemmy_db_schema::{
+        SortType,
+        newtypes::{CommunityId, PostId},
+    },
     lemmy_db_views::structs::{PaginationCursor, PostView},
     post::GetPostsResponse,
 };
@@ -53,6 +57,8 @@ pub enum Scope {
     Local,
     Subscribed,
     Saved,
+    Community(CommunityId),
+    Search,
 }
 
 #[derive(Default)]
@@ -66,6 +72,9 @@ pub struct Feed {
     cursor: Option<PaginationCursor>,
     generation: u64,
     api: Option<Api>,
+    query: String,
+    search_page: i64,
+    search_more: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -74,20 +83,30 @@ pub enum Message {
     More,
     Sort(usize),
     Scope(Scope),
+    Search(String),
+    CommunityDetails(CommunityId),
     Open(i32),
+    Scrolled(f32),
     Loaded(u64, bool, Result<GetPostsResponse, String>),
+    SearchLoaded(u64, bool, Result<Vec<PostView>, String>),
 }
 
 impl Feed {
     pub fn connect(&mut self, api: Api) -> Task<Message> {
-        if self.scope == Scope::Saved && !api.is_authenticated() {
+        if matches!(self.scope, Scope::Community(_) | Scope::Search)
+            || (matches!(self.scope, Scope::Saved | Scope::Subscribed) && !api.is_authenticated())
+        {
             self.scope = Scope::All;
         }
         self.api = Some(api);
         self.reload()
     }
 
-    fn can_view_saved(&self) -> bool {
+    pub fn scope(&self) -> Scope {
+        self.scope
+    }
+
+    pub fn signed_in(&self) -> bool {
         self.api.as_ref().is_some_and(Api::is_authenticated)
     }
 
@@ -95,6 +114,8 @@ impl Feed {
         self.generation += 1;
         self.posts.clear();
         self.cursor = None;
+        self.search_page = 1;
+        self.search_more = false;
         self.loaded = false;
         self.request(false)
     }
@@ -106,6 +127,12 @@ impl Feed {
         self.busy = true;
         self.error = None;
         let generation = self.generation;
+        if self.scope == Scope::Search {
+            return Task::perform(
+                service::search(api, self.query.clone(), self.sort, self.search_page),
+                move |result| Message::SearchLoaded(generation, append, result),
+            );
+        }
         let cursor = if append { self.cursor.clone() } else { None };
         Task::perform(
             service::load(api, self.sort, self.scope, cursor),
@@ -116,15 +143,23 @@ impl Feed {
     pub fn update(&mut self, message: Message) -> (Task<Message>, Option<PostView>) {
         match message {
             Message::Refresh => return (self.reload(), None),
-            Message::More if !self.busy && self.cursor.is_some() => {
+            Message::More if !self.busy && self.has_more() => {
                 return (self.request(true), None);
             }
             Message::Sort(index) => {
                 self.sort = Sort::from_index(index);
                 return (self.reload(), None);
             }
-            Message::Scope(scope) if scope != Scope::Saved || self.can_view_saved() => {
+            Message::Scope(scope)
+                if scope != Scope::Search
+                    && (!matches!(scope, Scope::Saved | Scope::Subscribed) || self.signed_in()) =>
+            {
                 self.scope = scope;
+                return (self.reload(), None);
+            }
+            Message::Search(query) if !query.is_empty() && self.api.is_some() => {
+                self.query = query;
+                self.scope = Scope::Search;
                 return (self.reload(), None);
             }
             Message::Open(id) => {
@@ -137,16 +172,19 @@ impl Feed {
                 self.busy = false;
                 match result {
                     Ok(response) => {
-                        self.loaded = true;
                         self.cursor = response.next_page;
-                        if !append {
-                            self.posts.clear();
-                        }
-                        for post in response.posts {
-                            if !self.posts.iter().any(|p| p.post.id == post.post.id) {
-                                self.posts.push(post);
-                            }
-                        }
+                        self.apply_posts(response.posts, append);
+                    }
+                    Err(error) => self.error = Some(error),
+                }
+            }
+            Message::SearchLoaded(generation, append, result) if generation == self.generation => {
+                self.busy = false;
+                match result {
+                    Ok(posts) => {
+                        self.search_more = posts.len() == service::PAGE_SIZE as usize;
+                        self.search_page += 1;
+                        self.apply_posts(posts.into_iter().filter(|post| !post.post.nsfw), append);
                     }
                     Err(error) => self.error = Some(error),
                 }
@@ -154,6 +192,22 @@ impl Feed {
             _ => {}
         }
         (Task::none(), None)
+    }
+
+    fn has_more(&self) -> bool {
+        self.cursor.is_some() || self.search_more
+    }
+
+    fn apply_posts(&mut self, posts: impl IntoIterator<Item = PostView>, append: bool) {
+        self.loaded = true;
+        if !append {
+            self.posts.clear();
+        }
+        for post in posts {
+            if !self.posts.iter().any(|p| p.post.id == post.post.id) {
+                self.posts.push(post);
+            }
+        }
     }
 
     pub fn api(&self) -> Option<Api> {
@@ -258,5 +312,36 @@ mod tests {
         let _ = feed.update(Message::Loaded(1, false, Err("old error".into())));
         assert!(feed.busy);
         assert!(feed.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn searches_all_communities_and_keeps_results_openable() {
+        let post = post_view();
+        let body = json!({
+            "type_": "Posts",
+            "posts": [post],
+            "comments": [],
+            "communities": [],
+            "users": []
+        })
+        .to_string();
+        let (api, request) = serve("200 OK", &body).await;
+        let mut feed = Feed::default();
+        let _ = feed.connect(api);
+        let (task, _) = feed.update(Message::Search("split reading".into()));
+        let _ = feed.update(loaded(task).await);
+        assert_eq!(feed.scope(), Scope::Search);
+        assert_eq!(feed.update(Message::Open(post.post.id.0)).1, Some(post));
+        let request = request.await.unwrap();
+        let line = request.lines().next().unwrap();
+        assert!(line.starts_with("GET /api/v3/search?"));
+        for param in [
+            "q=split+reading",
+            "type_=Posts",
+            "listing_type=All",
+            "page=1",
+        ] {
+            assert!(line.contains(param), "{line}");
+        }
     }
 }

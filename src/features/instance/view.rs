@@ -26,9 +26,7 @@ impl Instance {
                     .push(connect),
             );
         if let Some(name) = &self.name {
-            content = content.push(widget::text::caption(format!(
-                "Connected to {name} · anonymous browsing"
-            )));
+            content = content.push(widget::text::caption(format!("Connected to {name}")));
         }
         if let Some(error) = &self.error {
             content = content.push(widget::text::body(error));

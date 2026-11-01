@@ -1,10 +1,13 @@
 use super::{Scope, Sort};
 use crate::shared::api::Api;
 use lemmy_api_common::{
-    lemmy_db_schema::ListingType,
-    lemmy_db_views::structs::PaginationCursor,
+    lemmy_db_schema::{ListingType, SearchType},
+    lemmy_db_views::structs::{PaginationCursor, PostView},
     post::{GetPosts, GetPostsResponse},
+    site::{Search, SearchResponse},
 };
+
+pub const PAGE_SIZE: i64 = 20;
 
 pub async fn load(
     api: Api,
@@ -16,17 +19,44 @@ pub async fn load(
         "post/list",
         &GetPosts {
             type_: Some(match scope {
-                Scope::All | Scope::Saved => ListingType::All,
+                Scope::All | Scope::Saved | Scope::Community(_) | Scope::Search => ListingType::All,
                 Scope::Local => ListingType::Local,
                 Scope::Subscribed => ListingType::Subscribed,
             }),
             saved_only: (scope == Scope::Saved).then_some(true),
             sort: Some(sort.api()),
-            limit: Some(20),
+            limit: Some(PAGE_SIZE),
+            community_id: match scope {
+                Scope::Community(id) => Some(id),
+                _ => None,
+            },
             page_cursor: cursor,
             show_nsfw: Some(false),
             ..Default::default()
         },
     )
     .await
+}
+
+pub async fn search(
+    api: Api,
+    query: String,
+    sort: Sort,
+    page: i64,
+) -> Result<Vec<PostView>, String> {
+    let response: SearchResponse = api
+        .get(
+            "search",
+            &Search {
+                q: query,
+                type_: Some(SearchType::Posts),
+                listing_type: Some(ListingType::All),
+                sort: Some(sort.api()),
+                page: Some(page),
+                limit: Some(PAGE_SIZE),
+                ..Default::default()
+            },
+        )
+        .await?;
+    Ok(response.posts)
 }

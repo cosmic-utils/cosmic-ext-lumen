@@ -16,15 +16,15 @@ Enter a Lemmy instance hostname or root URL and select **Connect**. The last suc
 ## Features
 
 - Lemmy **0.19.x / API v3** instance connection and version validation.
-- All and Local public feeds, with Hot, New, Active, and Top today sorting.
-- Cursor pagination and duplicate post suppression.
-- Post bodies and comments rendered as Markdown.
-- Numerically ordered, collapsible comment threads; load additional comments in batches of 50.
-- Write Markdown comments and threaded replies while signed in.
+- Native COSMIC navigation, a side-by-side feed and discussion on wide windows, and single-pane reading on narrow windows.
+- All and Local feeds, community feeds, and post search. Use **Ctrl+K** to focus search and **Enter** to submit it.
+- Hot, New, Active, and Top today feed sorting, cursor pagination, and duplicate post suppression.
+- Markdown discussions with collapsible reply cards and Top, New, and Old comment sorting.
+- Vote on comments, write Markdown replies, and create text and link posts while signed in.
 - Request timeouts, retryable errors, and stale-response protection when navigating.
 - System theme, native widgets, browser links, and a saved instance preference.
 
-Supports saved accounts on one or multiple instances, account switching, optional two-factor login, native credential storage (Linux Secret Service, macOS Keychain, Windows Credential Manager), automatic session restoration, and the Subscribed feed. Open a post while signed in to upvote, downvote, or save it. Open the Saved feed to find bookmarks for the selected account. Select your current vote again to clear it, or choose Unsave to remove the bookmark. Use Anonymous to browse without a session. Remove account deletes its locally saved token. Posting, search, inbox, inline image downloads/cache, and API v4 support are future work. Image/link posts can be opened in the browser. NSFW posts are excluded from feed requests. Comment order follows the thread path; siblings appear by numeric ID.
+Use the account button in the header to connect to an instance or manage saved accounts. The app supports account switching, optional two-factor login, native credential storage, and automatic session restoration. **Subscribed**, **Saved**, and **Inbox** are scoped to the active account. The inbox shows replies and mentions and opens the relevant comment in its discussion. Select the community name on a post to browse its feed, or open **Community details** to manage the subscription. Select your current vote again to clear it. Image and link posts can be opened in the browser, and feeds exclude NSFW posts. Inline media, private messaging, and API v4 support are future work.
 
 ## Feature-based architecture
 

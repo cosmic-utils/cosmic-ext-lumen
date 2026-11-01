@@ -1,8 +1,14 @@
 use super::{Action, CommentTarget};
 use crate::shared::api::Api;
 use lemmy_api_common::{
-    comment::{CommentResponse, CreateComment, GetComments, GetCommentsResponse},
-    lemmy_db_schema::{CommentSortType, ListingType, newtypes::PostId},
+    comment::{
+        CommentResponse, CreateComment, CreateCommentLike, GetComment, GetComments,
+        GetCommentsResponse,
+    },
+    lemmy_db_schema::{
+        CommentSortType, ListingType,
+        newtypes::{CommentId, PostId},
+    },
     lemmy_db_views::structs::{CommentView, PostView},
     post::{CreatePostLike, PostResponse, SavePost},
 };
@@ -78,18 +84,41 @@ pub async fn act(api: Api, post: &PostView, action: Action) -> Result<PostView, 
     Ok(response.post_view)
 }
 
-pub async fn comments(api: Api, post: i32, page: i64) -> Result<GetCommentsResponse, String> {
+pub async fn comments(
+    api: Api,
+    post: PostId,
+    page: i64,
+    sort: CommentSortType,
+) -> Result<GetCommentsResponse, String> {
     api.get(
         "comment/list",
         &GetComments {
-            post_id: Some(PostId(post)),
+            post_id: Some(post),
             // A post's thread should be visible regardless of the default feed scope.
             type_: Some(ListingType::All),
-            sort: Some(CommentSortType::Old),
+            sort: Some(sort),
             page: Some(page),
             limit: Some(PAGE_SIZE as i64),
             ..Default::default()
         },
     )
     .await
+}
+
+pub async fn get_comment(api: Api, id: CommentId, post: PostId) -> Result<CommentView, String> {
+    let response: CommentResponse = api.get("comment", &GetComment { id }).await?;
+    if response.comment_view.comment.id != id || response.comment_view.comment.post_id != post {
+        return Err("The instance returned a different comment.".into());
+    }
+    Ok(response.comment_view)
+}
+
+pub async fn vote(api: Api, comment_id: CommentId, score: i16) -> Result<CommentView, String> {
+    let response: CommentResponse = api
+        .post("comment/like", &CreateCommentLike { comment_id, score })
+        .await?;
+    if response.comment_view.comment.id != comment_id {
+        return Err("The instance returned a different comment.".into());
+    }
+    Ok(response.comment_view)
 }

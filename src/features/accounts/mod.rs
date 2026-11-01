@@ -1,7 +1,13 @@
 mod storage;
 use crate::shared::api::Api;
-use cosmic::{Element, iced::Task, widget};
+use cosmic::{
+    Element,
+    iced::{Length, Task},
+    widget,
+};
 use lemmy_api_common::{
+    lemmy_db_schema::{SubscribedType, source::community::Community},
+    lemmy_db_views_actor::structs::CommunityView,
     person::{Login, LoginResponse},
     site::GetSiteResponse,
 };
@@ -27,7 +33,7 @@ pub enum Message {
     Switch(usize),
     Anonymous,
     Remove,
-    Ready(Result<(Account, Api), String>),
+    Ready(Result<(Account, Api, Vec<Community>), String>),
     Removed(Result<Option<String>, String>),
 }
 pub struct Accounts {
@@ -39,6 +45,7 @@ pub struct Accounts {
     error: Option<String>,
     http: reqwest::Client,
     session: Option<Api>,
+    follows: Vec<Community>,
 }
 impl Accounts {
     pub fn new(http: reqwest::Client) -> Self {
@@ -55,11 +62,13 @@ impl Accounts {
             error,
             http,
             session: None,
+            follows: Vec::new(),
         }
     }
     pub fn anonymous(&mut self) {
         self.registry.active = None;
         self.session = None;
+        self.follows.clear();
         self.error = storage::save(&self.registry).err();
     }
     pub fn restore(&mut self) -> Task<Message> {
@@ -88,8 +97,8 @@ impl Accounts {
                     .await
                     .map_err(|_| "Credential worker failed".to_string())??;
                 let api = Api::new(http, &account.instance)?.authenticated(token);
-                validate(&api).await?;
-                Ok((account, api))
+                let (_, follows) = validate(&api).await?;
+                Ok((account, api, follows))
             },
             Message::Ready,
         )
@@ -137,7 +146,7 @@ impl Accounts {
                                 .ok_or("No session token returned")?
                                 .into_inner();
                             let api = api.authenticated(token.clone());
-                            let name = validate(&api).await?;
+                            let (name, follows) = validate(&api).await?;
                             let account = existing
                                 .into_iter()
                                 .find(|a| a.instance == api.base.as_str() && a.name == name)
@@ -150,7 +159,7 @@ impl Accounts {
                             tokio::task::spawn_blocking(move || storage::write_token(&id, &token))
                                 .await
                                 .map_err(|_| "Credential worker failed".to_string())??;
-                            Ok((account, api))
+                            Ok((account, api, follows))
                         },
                         Message::Ready,
                     ),
@@ -161,8 +170,9 @@ impl Accounts {
             Message::Ready(result) => {
                 self.busy = false;
                 match result {
-                    Ok((account, api)) => {
+                    Ok((account, api, follows)) => {
                         self.session = Some(api.clone());
+                        self.follows = follows;
                         self.registry.active = Some(account.id.clone());
                         if !self.registry.accounts.iter().any(|a| a.id == account.id) {
                             self.registry.accounts.push(account)
@@ -222,19 +232,43 @@ impl Accounts {
 
     fn leave_session(&mut self, instance: &str) -> Option<Api> {
         let previous = self.session.take();
+        self.follows.clear();
         Api::new(self.http.clone(), instance)
             .ok()
             .or_else(|| previous.map(Api::into_anonymous))
     }
 
+    pub fn active(&self) -> Option<&Account> {
+        self.session.as_ref()?;
+        self.registry
+            .accounts
+            .iter()
+            .find(|account| Some(&account.id) == self.registry.active.as_ref())
+    }
+
+    pub fn follows(&self) -> &[Community] {
+        &self.follows
+    }
+
+    pub fn update_follow(&mut self, community: &CommunityView) {
+        self.follows
+            .retain(|item| item.id != community.community.id);
+        if community.subscribed == SubscribedType::Subscribed {
+            self.follows.push(community.community.clone());
+        }
+    }
+
     pub fn view(&self) -> Element<'_, Message> {
         let mut content = widget::column::with_capacity(5).spacing(8);
-        let mut picker = widget::row::with_capacity(self.registry.accounts.len() + 2).spacing(8);
+        let mut picker = widget::column::with_capacity(self.registry.accounts.len() + 2).spacing(4);
         for (index, a) in self.registry.accounts.iter().enumerate() {
             let mut b = widget::button::text(format!(
                 "{}@{}{}",
                 a.name,
-                a.instance,
+                a.instance
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .trim_end_matches('/'),
                 if self.registry.active.as_ref() == Some(&a.id) {
                     " ✓"
                 } else {
@@ -244,7 +278,7 @@ impl Accounts {
             if !self.busy {
                 b = b.on_press(Message::Switch(index))
             }
-            picker = picker.push(b);
+            picker = picker.push(b.width(Length::Fill));
         }
         if !self.busy {
             picker = picker.push(widget::button::text("Anonymous").on_press(Message::Anonymous));
@@ -263,7 +297,7 @@ impl Accounts {
             login = login.on_press(Message::Login)
         }
         content = content.push(
-            widget::row::with_capacity(4)
+            widget::column::with_capacity(4)
                 .spacing(8)
                 .push(
                     widget::text_input("Username or email", &self.username)
@@ -282,13 +316,21 @@ impl Accounts {
         content.into()
     }
 }
-async fn validate(api: &Api) -> Result<String, String> {
+async fn validate(api: &Api) -> Result<(String, Vec<Community>), String> {
     let site: GetSiteResponse = api.get("site", &()).await?;
     if !site.version.starts_with("0.19.") {
         return Err("Requires Lemmy 0.19.x".into());
     }
     site.my_user
-        .map(|u| u.local_user_view.person.name)
+        .map(|u| {
+            (
+                u.local_user_view.person.name,
+                u.follows
+                    .into_iter()
+                    .map(|follow| follow.community)
+                    .collect(),
+            )
+        })
         .ok_or("Session expired; log in again.".into())
 }
 

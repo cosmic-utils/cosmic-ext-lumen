@@ -2,6 +2,9 @@
 mod service;
 mod thread;
 mod view;
+pub(crate) use view::render_markdown;
+
+pub const SCROLL_ID: &str = "lemmy-discussion";
 
 use crate::shared::{api::Api, links::open_web_link};
 use cosmic::{
@@ -10,7 +13,10 @@ use cosmic::{
 };
 use lemmy_api_common::{
     comment::GetCommentsResponse,
-    lemmy_db_schema::newtypes::{CommentId, PostId},
+    lemmy_db_schema::{
+        CommentSortType,
+        newtypes::{CommentId, CommunityId, PostId},
+    },
     lemmy_db_views::structs::{CommentView, PostView},
 };
 use std::collections::{HashMap, HashSet};
@@ -51,6 +57,13 @@ pub struct Post {
     replies: HashMap<CommentId, Composer>,
     active_reply: Option<CommentId>,
     submitting: Option<CommentTarget>,
+    composer_open: bool,
+    sort: usize,
+    voting: Option<(u64, CommentId)>,
+    vote_error: Option<(CommentId, String)>,
+    pub focused_comment: Option<CommentId>,
+    focus_error: Option<String>,
+    link_error: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -63,8 +76,13 @@ pub enum Action {
 #[derive(Clone, Debug)]
 pub enum Message {
     Back,
+    ToggleFocus,
+    OpenCommunity(CommunityId),
+    CommunityDetails,
     Retry,
     More,
+    Sort(usize),
+    ToggleComposer,
     Collapse(i32),
     Link(String),
     Loaded(u64, Result<GetCommentsResponse, String>),
@@ -75,7 +93,16 @@ pub enum Message {
     EditComment(u64, CommentTarget, text_editor::Action),
     SubmitComment(u64, CommentTarget),
     CommentSubmitted(u64, Result<Box<CommentView>, String>),
+    Vote(u64, CommentId, i16),
+    VoteFinished(u64, Result<Box<CommentView>, String>),
+    FocusLoaded(u64, Result<Box<CommentView>, String>),
 }
+
+const COMMENT_SORTS: [CommentSortType; 3] = [
+    CommentSortType::Top,
+    CommentSortType::New,
+    CommentSortType::Old,
+];
 
 impl Post {
     pub fn open(&mut self, api: Api, post: PostView) -> Task<Message> {
@@ -86,9 +113,23 @@ impl Post {
         self.load()
     }
 
+    pub fn open_at(&mut self, api: Api, post: PostView, comment: CommentId) -> Task<Message> {
+        let post_id = post.post.id;
+        let load = self.open(api.clone(), post);
+        self.focused_comment = Some(comment);
+        let generation = self.generation;
+        Task::batch([
+            load,
+            Task::perform(service::get_comment(api, comment, post_id), move |result| {
+                Message::FocusLoaded(generation, result.map(Box::new))
+            }),
+        ])
+    }
+
     pub fn reset(&mut self) {
         self.close();
         self.pending_action = None;
+        self.voting = None;
     }
 
     pub fn close(&mut self) {
@@ -106,6 +147,11 @@ impl Post {
         self.replies.clear();
         self.active_reply = None;
         self.submitting = None;
+        self.composer_open = false;
+        self.vote_error = None;
+        self.focused_comment = None;
+        self.focus_error = None;
+        self.link_error = None;
     }
 
     fn set_selected(&mut self, post: PostView) {
@@ -184,7 +230,10 @@ impl Post {
         match result {
             Ok(comment) => {
                 match target {
-                    CommentTarget::Post => self.composer = Composer::default(),
+                    CommentTarget::Post => {
+                        self.composer = Composer::default();
+                        self.composer_open = false;
+                    }
                     CommentTarget::Reply(id) => {
                         self.replies.remove(&id);
                         self.active_reply = None;
@@ -197,7 +246,7 @@ impl Post {
                     }
                 }
                 self.add_comment(*comment);
-                self.comments.sort_by(|a, b| a.path.cmp(&b.path));
+                self.sort_comments();
                 let post = self.selected.as_mut()?;
                 post.counts.comments += 1;
                 Some(post.post.id)
@@ -209,6 +258,58 @@ impl Post {
                 None
             }
         }
+    }
+
+    fn sort_comments(&mut self) {
+        let order = COMMENT_SORTS[self.sort];
+        let ranks: HashMap<_, _> = self
+            .comments
+            .iter()
+            .map(|comment| {
+                let rank = match order {
+                    CommentSortType::New => -comment.data.comment.published.timestamp_micros(),
+                    CommentSortType::Old => comment.data.comment.published.timestamp_micros(),
+                    _ => -comment.data.counts.score,
+                };
+                (
+                    comment.data.comment.id.0,
+                    (!comment.data.comment.distinguished, rank),
+                )
+            })
+            .collect();
+        self.comments.sort_by_cached_key(|comment| {
+            comment
+                .path
+                .iter()
+                .map(|id| (ranks.get(id).copied().unwrap_or((true, 0)), *id))
+                .collect::<Vec<_>>()
+        });
+    }
+
+    fn vote(&mut self, generation: u64, id: CommentId, direction: i16) -> Task<Message> {
+        let Some(api) = self.api.as_ref().filter(|api| api.is_authenticated()) else {
+            return Task::none();
+        };
+        if generation != self.generation || self.voting.is_some() || !matches!(direction, -1 | 1) {
+            return Task::none();
+        }
+        let Some(comment) = self
+            .comments
+            .iter()
+            .find(|comment| comment.data.comment.id == id)
+        else {
+            return Task::none();
+        };
+        let score = if comment.data.my_vote == Some(direction) {
+            0
+        } else {
+            direction
+        };
+        self.voting = Some((generation, id));
+        self.vote_error = None;
+        Task::perform(service::vote(api.clone(), id, score), move |result| {
+            Message::VoteFinished(generation, result.map(Box::new))
+        })
     }
 
     fn add_comment(&mut self, data: CommentView) {
@@ -265,7 +366,7 @@ impl Post {
         self.error = None;
         let generation = self.generation;
         Task::perform(
-            service::comments(api, post.post.id.0, self.page),
+            service::comments(api, post.post.id, self.page, COMMENT_SORTS[self.sort]),
             move |result| Message::Loaded(generation, result),
         )
     }
@@ -273,6 +374,54 @@ impl Post {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Act(generation, action) => return self.act(generation, action),
+            Message::Vote(generation, id, score) => return self.vote(generation, id, score),
+            Message::VoteFinished(generation, result) => {
+                if let Some((_, id)) = self.voting.filter(|(pending, _)| *pending == generation) {
+                    self.voting = None;
+                    if generation == self.generation {
+                        match result {
+                            Ok(updated) => {
+                                if let Some(comment) = self
+                                    .comments
+                                    .iter_mut()
+                                    .find(|comment| comment.data.comment.id == id)
+                                {
+                                    comment.data.counts = updated.counts;
+                                    comment.data.my_vote = updated.my_vote;
+                                }
+                            }
+                            Err(error) => self.vote_error = Some((id, error)),
+                        }
+                    }
+                }
+            }
+            Message::FocusLoaded(generation, result) if generation == self.generation => {
+                match result {
+                    Ok(comment) => {
+                        self.add_comment(*comment);
+                        self.sort_comments();
+                    }
+                    Err(error) => self.focus_error = Some(error),
+                }
+            }
+            Message::Sort(sort)
+                if !self.busy
+                    && self.submitting.is_none()
+                    && self.voting.is_none()
+                    && sort < COMMENT_SORTS.len()
+                    && sort != self.sort =>
+            {
+                self.sort = sort;
+                self.comments
+                    .retain(|comment| Some(comment.data.comment.id) == self.focused_comment);
+                self.page = 1;
+                self.more = false;
+                return self.load();
+            }
+            Message::ToggleComposer if self.submitting.is_none() => {
+                self.composer_open = !self.composer_open;
+                self.active_reply = None;
+            }
             Message::OpenReply(generation, id)
                 if generation == self.generation
                     && self.submitting.is_none()
@@ -284,6 +433,7 @@ impl Post {
             {
                 self.replies.entry(id).or_default();
                 self.active_reply = Some(id);
+                self.composer_open = false;
             }
             Message::CancelReply(generation, id)
                 if generation == self.generation
@@ -311,9 +461,7 @@ impl Post {
                 }
             }
             Message::Link(url) => {
-                if let Err(error) = open_web_link(&url) {
-                    self.error = Some(error);
-                }
+                self.link_error = open_web_link(&url).err();
             }
             Message::Loaded(generation, result) if generation == self.generation => {
                 self.busy = false;
@@ -324,7 +472,7 @@ impl Post {
                         for data in response.comments {
                             self.add_comment(data);
                         }
-                        self.comments.sort_by(|a, b| a.path.cmp(&b.path));
+                        self.sort_comments();
                     }
                     Err(error) => self.error = Some(error),
                 }
@@ -424,6 +572,39 @@ pub(crate) mod tests {
         assert_eq!(path, "/api/v3/comment/list");
         assert!(query.split('&').any(|param| param == "type_=All"));
         assert!(query.split('&').any(|param| param == "post_id=17"));
+    }
+
+    #[tokio::test]
+    async fn clicking_an_existing_comment_vote_clears_it_after_confirmation() {
+        let selected = post_view();
+        let existing = comment_view(&selected, "Vote on this comment");
+        let mut updated = existing.clone();
+        updated.my_vote = Some(0);
+        updated.counts.score = 0;
+        let body = json!({"comment_view": updated, "recipient_ids": []}).to_string();
+        let (api, request) = serve("200 OK", &body).await;
+        let mut post = Post::default();
+        let _ = post.open(api.authenticated("test-account".into()), selected);
+        let id = existing.comment.id;
+        post.add_comment(existing);
+        let mut task =
+            runtime::task::into_stream(post.update(Message::Vote(post.generation, id, 1))).unwrap();
+        assert_eq!(post.comments[0].data.my_vote, Some(1));
+        let Some(runtime::Action::Output(message @ Message::VoteFinished(..))) = task.next().await
+        else {
+            panic!("vote did not finish");
+        };
+        let _ = post.update(message);
+        assert_eq!(post.comments[0].data.my_vote, Some(0));
+        assert_eq!(post.comments[0].data.counts.score, 0);
+        let request = request.await.unwrap();
+        assert!(request.starts_with("POST /api/v3/comment/like HTTP/1.1"));
+        assert!(request.contains("authorization: Bearer test-account\r\n"));
+        let (_, payload) = request.split_once("\r\n\r\n").unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(payload).unwrap(),
+            json!({"comment_id": 42, "score": 0})
+        );
     }
 
     #[tokio::test]
