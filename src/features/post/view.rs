@@ -1,7 +1,7 @@
 use super::{Action, Comment, CommentTarget, Composer, Message, Post, thread};
 use crate::shared::{
     api::Api,
-    presentation::{age, community_handle},
+    presentation::{age, community_handle, text_editor},
 };
 use cosmic::{
     Element,
@@ -38,14 +38,12 @@ impl Post {
         account_busy: bool,
     ) -> Element<'a, Message> {
         let generation = self.generation;
-        let submitting = self.submitting == Some(target);
+        let submitting = self.submitting_target() == Some(target);
         let (placeholder, label) = match target {
             CommentTarget::Post => ("Write a comment", "Post comment"),
             CommentTarget::Reply(_) => ("Write a reply", "Post reply"),
         };
-        let mut editor = widget::text_editor::TextEditor::new(&composer.draft)
-            .placeholder(placeholder)
-            .height(Length::Fixed(100.0));
+        let mut editor = text_editor(&composer.draft, placeholder).height(Length::Fixed(100.0));
         if !submitting {
             editor =
                 editor.on_action(move |action| Message::EditComment(generation, target, action));

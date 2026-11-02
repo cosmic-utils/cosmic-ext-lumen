@@ -152,8 +152,7 @@ impl Publish {
                 input
             });
         }
-        let editor = text_editor::TextEditor::new(&self.body)
-            .placeholder("Write in Markdown")
+        let editor = crate::shared::presentation::text_editor(&self.body, "Write in Markdown")
             .height(Length::Fixed(110.0));
         let editor = if self.busy {
             editor

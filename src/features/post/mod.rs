@@ -39,6 +39,13 @@ struct Composer {
     error: Option<String>,
 }
 
+struct DiscussionDrafts {
+    composer: Composer,
+    composer_open: bool,
+    replies: HashMap<CommentId, Composer>,
+    active_reply: Option<CommentId>,
+}
+
 #[derive(Default)]
 pub struct Post {
     pub selected: Option<PostView>,
@@ -56,7 +63,8 @@ pub struct Post {
     composer: Composer,
     replies: HashMap<CommentId, Composer>,
     active_reply: Option<CommentId>,
-    submitting: Option<CommentTarget>,
+    submitting: Option<(u64, PostId, CommentTarget)>,
+    drafts: HashMap<PostId, DiscussionDrafts>,
     composer_open: bool,
     sort: usize,
     voting: Option<(u64, CommentId)>,
@@ -107,6 +115,12 @@ const COMMENT_SORTS: [CommentSortType; 3] = [
 impl Post {
     pub fn open(&mut self, api: Api, post: PostView) -> Task<Message> {
         self.close();
+        if let Some(drafts) = self.drafts.remove(&post.post.id) {
+            self.composer = drafts.composer;
+            self.composer_open = drafts.composer_open;
+            self.replies = drafts.replies;
+            self.active_reply = drafts.active_reply;
+        }
         self.api = Some(api);
         self.set_selected(post);
         self.page = 1;
@@ -130,9 +144,27 @@ impl Post {
         self.close();
         self.pending_action = None;
         self.voting = None;
+        self.submitting = None;
+        self.drafts.clear();
     }
 
     pub fn close(&mut self) {
+        let composer = std::mem::take(&mut self.composer);
+        let mut replies = std::mem::take(&mut self.replies);
+        replies.retain(|_, reply| !reply.draft.text().trim().is_empty());
+        if let Some(post) = &self.selected
+            && (!composer.draft.text().trim().is_empty() || !replies.is_empty())
+        {
+            self.drafts.insert(
+                post.post.id,
+                DiscussionDrafts {
+                    composer,
+                    composer_open: self.composer_open,
+                    active_reply: self.active_reply.filter(|id| replies.contains_key(id)),
+                    replies,
+                },
+            );
+        }
         self.generation += 1;
         self.api = None;
         self.selected = None;
@@ -143,10 +175,7 @@ impl Post {
         self.more = false;
         self.error = None;
         self.action_error = None;
-        self.composer = Composer::default();
-        self.replies.clear();
         self.active_reply = None;
-        self.submitting = None;
         self.composer_open = false;
         self.vote_error = None;
         self.focused_comment = None;
@@ -199,7 +228,7 @@ impl Post {
         let (Some(api), Some(post)) = (&self.api, &self.selected) else {
             return Task::none();
         };
-        if !api.is_authenticated() {
+        if !api.is_authenticated() || post.post.locked || post.post.deleted || post.post.removed {
             return Task::none();
         }
         let (api, post_id) = (api.clone(), post.post.id);
@@ -211,7 +240,7 @@ impl Post {
             return Task::none();
         }
         composer.error = None;
-        self.submitting = Some(target);
+        self.submitting = Some((generation, post_id, target));
         Task::perform(
             service::create_comment(api, post_id, target, content),
             move |result| Message::CommentSubmitted(generation, result.map(Box::new)),
@@ -223,10 +252,37 @@ impl Post {
         generation: u64,
         result: Result<Box<CommentView>, String>,
     ) -> Option<PostId> {
-        if generation != self.generation {
-            return None;
+        let (_, post_id, target) = self
+            .submitting
+            .filter(|(request, _, _)| *request == generation)?;
+        self.submitting = None;
+        if !self
+            .selected
+            .as_ref()
+            .is_some_and(|post| post.post.id == post_id)
+        {
+            if let Some(drafts) = self.drafts.get_mut(&post_id) {
+                match (target, &result) {
+                    (CommentTarget::Post, Ok(_)) => {
+                        drafts.composer = Composer::default();
+                        drafts.composer_open = false;
+                    }
+                    (CommentTarget::Reply(id), Ok(_)) => {
+                        drafts.replies.remove(&id);
+                        drafts.active_reply = None;
+                    }
+                    (CommentTarget::Post, Err(error)) => {
+                        drafts.composer.error = Some(error.clone())
+                    }
+                    (CommentTarget::Reply(id), Err(error)) => {
+                        if let Some(reply) = drafts.replies.get_mut(&id) {
+                            reply.error = Some(error.clone());
+                        }
+                    }
+                }
+            }
+            return result.ok().map(|_| post_id);
         }
-        let target = self.submitting.take()?;
         match result {
             Ok(comment) => {
                 match target {
@@ -245,11 +301,16 @@ impl Post {
                         }
                     }
                 }
+                let already_loaded = self
+                    .comments
+                    .iter()
+                    .any(|item| item.data.comment.id == comment.comment.id);
                 self.add_comment(*comment);
                 self.sort_comments();
-                let post = self.selected.as_mut()?;
-                post.counts.comments += 1;
-                Some(post.post.id)
+                if !already_loaded {
+                    self.selected.as_mut()?.counts.comments += 1;
+                }
+                Some(post_id)
             }
             Err(error) => {
                 if let Some(composer) = self.composer_mut(target) {
@@ -258,6 +319,14 @@ impl Post {
                 None
             }
         }
+    }
+
+    fn submitting_target(&self) -> Option<CommentTarget> {
+        let (_, post_id, target) = self.submitting?;
+        self.selected
+            .as_ref()
+            .filter(|post| post.post.id == post_id)
+            .map(|_| target)
     }
 
     fn sort_comments(&mut self) {
@@ -444,7 +513,7 @@ impl Post {
                 self.active_reply = None;
             }
             Message::EditComment(generation, target, action)
-                if generation == self.generation && self.submitting != Some(target) =>
+                if generation == self.generation && self.submitting_target() != Some(target) =>
             {
                 if let Some(composer) = self.composer_mut(target) {
                     composer.draft.perform(action);
@@ -924,5 +993,50 @@ pub(crate) mod tests {
         let _ = post.update(Message::Loaded(0, Err("stale error".into())));
         assert!(post.error.is_none());
         assert!(!post.busy);
+    }
+
+    #[tokio::test]
+    async fn switching_discussions_preserves_drafts_and_recovers_a_failed_submission() {
+        let (api, request) = serve("403 Forbidden", "{}").await;
+        let api = api.authenticated("test-account".into());
+        let first = post_view();
+        let mut second = first.clone();
+        second.post.id = PostId(18);
+        let mut post = Post::default();
+        let _ = post.open(api.clone(), first.clone());
+        let parent = comment_view(&first, "Parent");
+        let parent_id = parent.comment.id;
+        post.add_comment(parent);
+        post.replies.insert(
+            parent_id,
+            Composer {
+                draft: text_editor::Content::with_text("Unfinished reply"),
+                error: None,
+            },
+        );
+        post.composer_open = true;
+        post.composer.draft = text_editor::Content::with_text("Unfinished comment");
+
+        let mut task =
+            runtime::task::into_stream(post.submit_comment(post.generation, CommentTarget::Post))
+                .unwrap();
+        let _ = post.open(api.clone(), second);
+        assert!(post.composer.draft.text().is_empty());
+        let Some(runtime::Action::Output(Message::CommentSubmitted(generation, result))) =
+            task.next().await
+        else {
+            panic!("comment submission did not finish");
+        };
+        assert!(post.finish_comment(generation, result).is_none());
+        let _ = post.open(api.clone(), first.clone());
+        assert!(post.composer_open);
+        assert_eq!(post.composer.draft.text(), "Unfinished comment");
+        assert!(post.composer.error.as_deref().unwrap().contains("403"));
+        assert_eq!(post.replies[&parent_id].draft.text(), "Unfinished reply");
+        post.reset();
+        let _ = post.open(api, first);
+        assert!(post.composer.draft.text().is_empty());
+        assert!(post.replies.is_empty());
+        request.await.unwrap();
     }
 }
