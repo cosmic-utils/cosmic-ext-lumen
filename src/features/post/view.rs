@@ -1,7 +1,7 @@
 use super::{Action, Comment, CommentTarget, Composer, Message, Post, thread};
 use crate::shared::{
     api::Api,
-    presentation::{age, community_handle, text_editor},
+    presentation::{age, community_handle, text_editor, toggle_button_class},
 };
 use cosmic::{
     Element,
@@ -42,6 +42,7 @@ impl Post {
         let (placeholder, label) = match target {
             CommentTarget::Post => ("Write a comment", "Post comment"),
             CommentTarget::Reply(_) => ("Write a reply", "Post reply"),
+            CommentTarget::Edit(_) => ("Edit comment", "Save changes"),
         };
         let mut editor = text_editor(&composer.draft, placeholder).height(Length::Fixed(100.0));
         if !submitting {
@@ -51,21 +52,35 @@ impl Post {
         let can_submit = !account_busy
             && self.submitting.is_none()
             && self.pending_action.is_none()
+            && match target {
+                CommentTarget::Edit(_) => self.comment_action.is_none(),
+                CommentTarget::Reply(id) => self
+                    .comment_action
+                    .as_ref()
+                    .is_none_or(|pending| pending.comment != id),
+                CommentTarget::Post => true,
+            }
             && !composer.draft.text().trim().is_empty();
-        let mut buttons = widget::row::with_capacity(2).spacing(8).push(
-            widget::button::suggested(if submitting { "Posting…" } else { label })
-                .on_press_maybe(can_submit.then_some(Message::SubmitComment(generation, target))),
-        );
-        {
-            let cancel = match target {
-                CommentTarget::Post => Message::ToggleComposer,
-                CommentTarget::Reply(id) => Message::CancelReply(generation, id),
-            };
-            buttons = buttons.push(
-                widget::button::standard("Cancel")
-                    .on_press_maybe(self.submitting.is_none().then_some(cancel)),
-            );
-        }
+        let label = match (submitting, target) {
+            (true, CommentTarget::Edit(_)) => "Saving…",
+            (true, _) => "Posting…",
+            (false, _) => label,
+        };
+        let cancel = match target {
+            CommentTarget::Post => Message::ToggleComposer,
+            CommentTarget::Reply(id) => Message::CancelReply(generation, id),
+            CommentTarget::Edit(id) => Message::CancelEdit(generation, id),
+        };
+        let buttons =
+            widget::row::with_capacity(2)
+                .spacing(8)
+                .push(widget::button::suggested(label).on_press_maybe(
+                    can_submit.then_some(Message::SubmitComment(generation, target)),
+                ))
+                .push(
+                    widget::button::standard("Cancel")
+                        .on_press_maybe(self.submitting.is_none().then_some(cancel)),
+                );
         let mut content = widget::column::with_capacity(3)
             .spacing(8)
             .push(editor)
@@ -121,7 +136,7 @@ impl Post {
                 } else {
                     "Focus reading"
                 })
-                .selected(focused)
+                .class(toggle_button_class(focused, button::ButtonClass::Icon))
                 .on_press(Message::ToggleFocus),
             );
         }
@@ -164,6 +179,21 @@ impl Post {
             } else {
                 widget::text::title1(&post.post.name)
             });
+        if let Some(id) = self.focused_comment {
+            if let Some(comment) = self
+                .comments
+                .iter()
+                .find(|comment| comment.data.comment.id == id)
+            {
+                content = content
+                    .push(widget::text::caption("Comment in context"))
+                    .push(self.comment_card(comment, can_write, signed_in, account_busy, 0));
+            } else if let Some(error) = &self.focus_error {
+                content = content.push(widget::text::body(error));
+            } else {
+                content = content.push(widget::text::caption("Loading comment…"));
+            }
+        }
         if let Some(url) = &post.post.url {
             content = content
                 .push(button::link(url.to_string()).on_press(Message::Link(url.to_string())));
@@ -186,6 +216,10 @@ impl Post {
         if signed_in {
             actions = actions.push(
                 button::standard(if post.saved { "Saved" } else { "Save" })
+                    .class(toggle_button_class(
+                        post.saved,
+                        button::ButtonClass::Standard,
+                    ))
                     .leading_icon(icon::from_name("bookmark-new-symbolic"))
                     .on_press_maybe(
                         can_act.then_some(Message::Act(self.generation, Action::ToggleSaved)),
@@ -267,19 +301,6 @@ impl Post {
         } else if self.comments.is_empty() && self.error.is_none() {
             content = content.push(widget::text::body("No comments yet."));
         }
-        if let Some(id) = self.focused_comment {
-            if let Some(comment) = self
-                .comments
-                .iter()
-                .find(|comment| comment.data.comment.id == id)
-            {
-                content = content
-                    .push(widget::text::caption("From your inbox"))
-                    .push(self.comment_card(comment, can_write, signed_in, account_busy, 0));
-            } else if let Some(error) = &self.focus_error {
-                content = content.push(widget::text::body(error));
-            }
-        }
         for comment in &self.comments {
             if Some(comment.data.comment.id) != self.focused_comment
                 && !thread::hidden(&comment.path, &self.collapsed)
@@ -359,11 +380,12 @@ impl Post {
             .push(header);
         if !collapsed {
             row = row.push(render_markdown(&comment.body, Message::Link));
-            let can_vote = signed_in
+            let can_act = signed_in
                 && !account_busy
-                && self.voting.is_none()
-                && !comment.data.comment.deleted
-                && !comment.data.comment.removed;
+                && self.comment_action.is_none()
+                && self.submitting_target() != Some(CommentTarget::Edit(id));
+            let can_vote =
+                can_act && !comment.data.comment.deleted && !comment.data.comment.removed;
             let mut actions = widget::row::with_capacity(2)
                 .spacing(space.space_xxxs)
                 .align_y(Alignment::Center)
@@ -375,7 +397,23 @@ impl Post {
                         Message::Vote(self.generation, id, -1),
                     )),
                 ));
-            if can_write {
+            if signed_in {
+                let saved = comment.data.saved;
+                actions = actions.push(
+                    button::icon(icon::from_name("user-bookmarks-symbolic"))
+                        .class(toggle_button_class(saved, button::ButtonClass::Icon))
+                        .tooltip(if saved {
+                            "Unsave comment"
+                        } else {
+                            "Save comment"
+                        })
+                        .on_press_maybe(
+                            (can_vote || (saved && can_act))
+                                .then_some(Message::SaveComment(self.generation, id)),
+                        ),
+                );
+            }
+            if can_write && !comment.data.comment.deleted && !comment.data.comment.removed {
                 actions = actions.push(
                     button::text("Reply")
                         .leading_icon(icon::from_name("mail-reply-all-symbolic"))
@@ -386,11 +424,71 @@ impl Post {
                         ),
                 );
             }
-            row = row.push(actions);
-            if let Some((_, error)) = self.vote_error.as_ref().filter(|(voted, _)| *voted == id) {
+            if signed_in && self.owns_comment(comment) {
+                let can_change =
+                    !account_busy && self.comment_action.is_none() && self.submitting.is_none();
+                let deleted = comment.data.comment.deleted;
+                if !deleted {
+                    actions = actions.push(
+                        button::icon(icon::from_name("document-edit-symbolic"))
+                            .tooltip("Edit comment")
+                            .on_press_maybe(
+                                (can_change && self.edit.is_none())
+                                    .then_some(Message::OpenEdit(self.generation, id)),
+                            ),
+                    );
+                }
+                actions = actions.push(
+                    button::icon(icon::from_name(if deleted {
+                        "edit-undo-symbolic"
+                    } else {
+                        "edit-delete-symbolic"
+                    }))
+                    .tooltip(if deleted {
+                        "Restore comment"
+                    } else {
+                        "Delete comment"
+                    })
+                    .on_press_maybe(
+                        can_change.then_some(Message::DeleteComment(self.generation, id)),
+                    ),
+                );
+            }
+            if comment.parent().is_some() {
+                actions = actions.push(
+                    button::icon(icon::from_name("go-top-symbolic"))
+                        .tooltip("Jump to parent comment")
+                        .on_press(Message::JumpToParent(self.generation, id)),
+                );
+            }
+            actions = actions.push(
+                button::icon(icon::from_name("edit-copy-symbolic"))
+                    .tooltip("Copy comment permalink")
+                    .on_press(Message::CopyPermalink(
+                        comment.data.comment.ap_id.to_string(),
+                    )),
+            );
+            row = row.push(actions.wrap());
+            if let Some((_, error)) = self
+                .comment_action_error
+                .as_ref()
+                .filter(|(voted, _)| *voted == id)
+            {
                 row = row.push(widget::text::caption(error));
             }
+            if let Some((_, composer)) = self.edit.as_ref().filter(|(editing, _)| *editing == id)
+                && self.owns_comment(comment)
+                && !comment.data.comment.deleted
+            {
+                row = row.push(self.comment_composer(
+                    composer,
+                    CommentTarget::Edit(id),
+                    account_busy,
+                ));
+            }
             if can_write
+                && !comment.data.comment.deleted
+                && !comment.data.comment.removed
                 && self.active_reply == Some(id)
                 && let Some(composer) = self.replies.get(&id)
             {
@@ -443,7 +541,10 @@ fn votes(
                 } else {
                     "Upvote"
                 })
-                .selected(current == Some(1))
+                .class(toggle_button_class(
+                    current == Some(1),
+                    button::ButtonClass::Icon,
+                ))
                 .on_press_maybe(up),
         )
         .push(widget::text::caption(score.to_string()).font(cosmic::font::semibold()))
@@ -455,7 +556,10 @@ fn votes(
                 } else {
                     "Downvote"
                 })
-                .selected(current == Some(-1))
+                .class(toggle_button_class(
+                    current == Some(-1),
+                    button::ButtonClass::Icon,
+                ))
                 .on_press_maybe(down),
         )
         .into()

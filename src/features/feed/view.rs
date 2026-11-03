@@ -24,17 +24,27 @@ impl Feed {
                 widget::text::title3(title)
                     .width(Length::Fill)
                     .wrapping(Wrapping::WordOrGlyph),
-            )
-            .push(widget::dropdown(
+            );
+        let comments = self.viewing_saved_comments();
+        if self.scope == Scope::Saved {
+            controls = controls.push(widget::dropdown(
+                &["Posts", "Comments"][..],
+                Some(usize::from(comments)),
+                Message::SavedTab,
+            ));
+        }
+        if !comments {
+            controls = controls.push(widget::dropdown(
                 Sort::LABELS.as_slice(),
                 Some(self.sort.index()),
                 Message::Sort,
-            ))
-            .push(
-                button::icon(icon::from_name("view-refresh-symbolic"))
-                    .tooltip("Refresh feed")
-                    .on_press_maybe((!self.busy && self.api.is_some()).then_some(Message::Refresh)),
-            );
+            ));
+        }
+        controls = controls.push(
+            button::icon(icon::from_name("view-refresh-symbolic"))
+                .tooltip("Refresh feed")
+                .on_press_maybe((!self.busy && self.api.is_some()).then_some(Message::Refresh)),
+        );
         if let Scope::Community(id) = self.scope {
             controls = controls.push(
                 button::icon(icon::from_name("dialog-information-symbolic"))
@@ -44,17 +54,26 @@ impl Feed {
         }
         let mut content =
             widget::column::with_capacity(self.posts.len() + 3).spacing(space.space_xxs);
+        if let Some(error) = &self.open_error {
+            content = content.push(widget::text::body(error));
+        }
+        let empty = self.posts.is_empty() && self.saved_comments.is_empty();
         if let Some(error) = &self.error {
             content = content.push(widget::text::body(error));
-            if self.posts.is_empty() && !self.has_more() {
+            if empty && !self.has_more() {
                 content = content.push(button::standard("Retry").on_press(Message::Refresh));
             }
         }
-        if self.posts.is_empty() && self.error.is_none() {
+        if empty && self.error.is_none() {
             let message = if self.busy {
-                "Loading posts…"
+                if comments {
+                    "Loading comments…"
+                } else {
+                    "Loading posts…"
+                }
             } else if self.loaded {
                 match self.scope {
+                    Scope::Saved if comments => "No saved comments.",
                     Scope::Saved => "No saved posts.",
                     Scope::Search => "No matching posts.",
                     _ => "No posts in this feed.",
@@ -100,10 +119,46 @@ impl Feed {
                 Some(Message::Open(post.post.id.0)),
             ));
         }
+        for comment in &self.saved_comments {
+            let label = if comment.comment.deleted {
+                "[deleted]"
+            } else if comment.comment.removed {
+                "[removed]"
+            } else {
+                &comment.comment.content
+            };
+            let card = widget::column::with_capacity(3)
+                .spacing(space.space_xxxs)
+                .push(
+                    widget::text::caption(format!(
+                        "{} · !{}",
+                        comment.creator.name,
+                        community_handle(&comment.community)
+                    ))
+                    .wrapping(Wrapping::WordOrGlyph),
+                )
+                .push(widget::text::body(&comment.post.name).font(cosmic::font::semibold()))
+                .push(widget::text::body(label).wrapping(Wrapping::WordOrGlyph))
+                .width(Length::Fill);
+            content = content.push(selectable_card(
+                card,
+                if compact {
+                    space.space_xxs
+                } else {
+                    space.space_xs
+                },
+                self.opening_comment == Some(comment.comment.id),
+                self.opening_comment
+                    .is_none()
+                    .then_some(Message::OpenComment(comment.comment.id)),
+            ));
+        }
         if self.has_more() {
             content = content.push(
                 button::standard(if self.busy {
                     "Loading…"
+                } else if comments {
+                    "Load more comments"
                 } else {
                     "Load more posts"
                 })

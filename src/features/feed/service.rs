@@ -1,8 +1,9 @@
 use super::{Scope, Sort};
 use crate::shared::api::Api;
 use lemmy_api_common::{
-    lemmy_db_schema::{ListingType, SearchType},
-    lemmy_db_views::structs::{PaginationCursor, PostView},
+    comment::{GetComments, GetCommentsResponse},
+    lemmy_db_schema::{CommentSortType, ListingType, SearchType},
+    lemmy_db_views::structs::{CommentView, PaginationCursor, PostView},
     post::{GetPosts, GetPostsResponse},
     site::{Search, SearchResponse},
 };
@@ -59,4 +60,21 @@ pub async fn search(
         )
         .await?;
     Ok(response.posts)
+}
+
+pub async fn saved_comments(api: Api, page: i64) -> Result<Vec<CommentView>, String> {
+    let response: GetCommentsResponse = api
+        .get(
+            "comment/list",
+            &GetComments {
+                type_: Some(ListingType::All),
+                sort: Some(CommentSortType::New),
+                saved_only: Some(true),
+                page: Some(page),
+                limit: Some(PAGE_SIZE),
+                ..Default::default()
+            },
+        )
+        .await?;
+    Ok(response.comments)
 }

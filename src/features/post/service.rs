@@ -1,16 +1,16 @@
-use super::{Action, CommentTarget};
+use super::{Action, CommentAction, CommentTarget};
 use crate::shared::api::Api;
 use lemmy_api_common::{
     comment::{
-        CommentResponse, CreateComment, CreateCommentLike, GetComment, GetComments,
-        GetCommentsResponse,
+        CommentResponse, CreateComment, CreateCommentLike, DeleteComment, EditComment, GetComment,
+        GetComments, GetCommentsResponse, SaveComment,
     },
     lemmy_db_schema::{
         CommentSortType, ListingType,
         newtypes::{CommentId, PostId},
     },
     lemmy_db_views::structs::{CommentView, PostView},
-    post::{CreatePostLike, PostResponse, SavePost},
+    post::{CreatePostLike, GetPost, GetPostResponse, PostResponse, SavePost},
 };
 
 pub const PAGE_SIZE: usize = 50;
@@ -24,6 +24,19 @@ pub async fn create_comment(
     let parent_id = match target {
         CommentTarget::Post => None,
         CommentTarget::Reply(id) => Some(id),
+        CommentTarget::Edit(comment_id) => {
+            let response = api
+                .put(
+                    "comment",
+                    &EditComment {
+                        comment_id,
+                        content: Some(content),
+                        language_id: None,
+                    },
+                )
+                .await?;
+            return checked_comment(response, post_id, comment_id);
+        }
     };
     let response: CommentResponse = api
         .post(
@@ -107,18 +120,63 @@ pub async fn comments(
 
 pub async fn get_comment(api: Api, id: CommentId, post: PostId) -> Result<CommentView, String> {
     let response: CommentResponse = api.get("comment", &GetComment { id }).await?;
-    if response.comment_view.comment.id != id || response.comment_view.comment.post_id != post {
+    checked_comment(response, post, id)
+}
+
+pub async fn act_on_comment(
+    api: Api,
+    post_id: PostId,
+    comment_id: CommentId,
+    action: CommentAction,
+) -> Result<CommentView, String> {
+    let response: CommentResponse = match action {
+        CommentAction::Vote(score) => {
+            api.post("comment/like", &CreateCommentLike { comment_id, score })
+                .await?
+        }
+        CommentAction::SetDeleted(deleted) => {
+            api.post(
+                "comment/delete",
+                &DeleteComment {
+                    comment_id,
+                    deleted,
+                },
+            )
+            .await?
+        }
+        CommentAction::Save(save) => {
+            api.put("comment/save", &SaveComment { comment_id, save })
+                .await?
+        }
+    };
+    checked_comment(response, post_id, comment_id)
+}
+
+fn checked_comment(
+    response: CommentResponse,
+    post_id: PostId,
+    comment_id: CommentId,
+) -> Result<CommentView, String> {
+    if response.comment_view.comment.id != comment_id
+        || response.comment_view.comment.post_id != post_id
+    {
         return Err("The instance returned a different comment.".into());
     }
     Ok(response.comment_view)
 }
 
-pub async fn vote(api: Api, comment_id: CommentId, score: i16) -> Result<CommentView, String> {
-    let response: CommentResponse = api
-        .post("comment/like", &CreateCommentLike { comment_id, score })
+pub async fn get_post(api: &Api, id: PostId) -> Result<PostView, String> {
+    let response: GetPostResponse = api
+        .get(
+            "post",
+            &GetPost {
+                id: Some(id),
+                comment_id: None,
+            },
+        )
         .await?;
-    if response.comment_view.comment.id != comment_id {
-        return Err("The instance returned a different comment.".into());
+    if response.post_view.post.id != id {
+        return Err("The instance returned a different post.".into());
     }
-    Ok(response.comment_view)
+    Ok(response.post_view)
 }

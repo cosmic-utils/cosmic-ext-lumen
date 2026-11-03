@@ -6,7 +6,7 @@ use cosmic::{
     widget,
 };
 use lemmy_api_common::{
-    lemmy_db_schema::{SubscribedType, source::community::Community},
+    lemmy_db_schema::{SubscribedType, newtypes::PersonId, source::community::Community},
     lemmy_db_views_actor::structs::CommunityView,
     person::{Login, LoginResponse},
     site::GetSiteResponse,
@@ -33,9 +33,17 @@ pub enum Message {
     Switch(usize),
     Anonymous,
     Remove,
-    Ready(Result<(Account, Api, Vec<Community>), String>),
+    Ready(Result<Session, String>),
     Removed(Result<Option<String>, String>),
 }
+#[derive(Clone)]
+pub struct Session {
+    account: Account,
+    api: Api,
+    follows: Vec<Community>,
+    person_id: PersonId,
+}
+
 pub struct Accounts {
     registry: Registry,
     username: String,
@@ -46,6 +54,7 @@ pub struct Accounts {
     http: reqwest::Client,
     session: Option<Api>,
     follows: Vec<Community>,
+    person_id: Option<PersonId>,
 }
 impl Accounts {
     pub fn new(http: reqwest::Client) -> Self {
@@ -63,12 +72,14 @@ impl Accounts {
             http,
             session: None,
             follows: Vec::new(),
+            person_id: None,
         }
     }
     pub fn anonymous(&mut self) {
         self.registry.active = None;
         self.session = None;
         self.follows.clear();
+        self.person_id = None;
         self.error = storage::save(&self.registry).err();
     }
     pub fn restore(&mut self) -> Task<Message> {
@@ -97,8 +108,13 @@ impl Accounts {
                     .await
                     .map_err(|_| "Credential worker failed".to_string())??;
                 let api = Api::new(http, &account.instance)?.authenticated(token);
-                let (_, follows) = validate(&api).await?;
-                Ok((account, api, follows))
+                let (_, person_id, follows) = validate(&api).await?;
+                Ok(Session {
+                    account,
+                    api,
+                    follows,
+                    person_id,
+                })
             },
             Message::Ready,
         )
@@ -146,7 +162,7 @@ impl Accounts {
                                 .ok_or("No session token returned")?
                                 .into_inner();
                             let api = api.authenticated(token.clone());
-                            let (name, follows) = validate(&api).await?;
+                            let (name, person_id, follows) = validate(&api).await?;
                             let account = existing
                                 .into_iter()
                                 .find(|a| a.instance == api.base.as_str() && a.name == name)
@@ -159,7 +175,12 @@ impl Accounts {
                             tokio::task::spawn_blocking(move || storage::write_token(&id, &token))
                                 .await
                                 .map_err(|_| "Credential worker failed".to_string())??;
-                            Ok((account, api, follows))
+                            Ok(Session {
+                                account,
+                                api,
+                                follows,
+                                person_id,
+                            })
                         },
                         Message::Ready,
                     ),
@@ -170,9 +191,15 @@ impl Accounts {
             Message::Ready(result) => {
                 self.busy = false;
                 match result {
-                    Ok((account, api, follows)) => {
+                    Ok(Session {
+                        account,
+                        api,
+                        follows,
+                        person_id,
+                    }) => {
                         self.session = Some(api.clone());
                         self.follows = follows;
+                        self.person_id = Some(person_id);
                         self.registry.active = Some(account.id.clone());
                         if !self.registry.accounts.iter().any(|a| a.id == account.id) {
                             self.registry.accounts.push(account)
@@ -233,6 +260,7 @@ impl Accounts {
     fn leave_session(&mut self, instance: &str) -> Option<Api> {
         let previous = self.session.take();
         self.follows.clear();
+        self.person_id = None;
         Api::new(self.http.clone(), instance)
             .ok()
             .or_else(|| previous.map(Api::into_anonymous))
@@ -244,6 +272,10 @@ impl Accounts {
             .accounts
             .iter()
             .find(|account| Some(&account.id) == self.registry.active.as_ref())
+    }
+
+    pub fn person_id(&self) -> Option<PersonId> {
+        self.person_id
     }
 
     pub fn follows(&self) -> &[Community] {
@@ -316,7 +348,7 @@ impl Accounts {
         content.into()
     }
 }
-async fn validate(api: &Api) -> Result<(String, Vec<Community>), String> {
+async fn validate(api: &Api) -> Result<(String, PersonId, Vec<Community>), String> {
     let site: GetSiteResponse = api.get("site", &()).await?;
     if !site.version.starts_with("0.19.") {
         return Err("Requires Lemmy 0.19.x".into());
@@ -325,6 +357,7 @@ async fn validate(api: &Api) -> Result<(String, Vec<Community>), String> {
         .map(|u| {
             (
                 u.local_user_view.person.name,
+                u.local_user_view.person.id,
                 u.follows
                     .into_iter()
                     .map(|follow| follow.community)

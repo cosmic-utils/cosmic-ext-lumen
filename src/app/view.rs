@@ -1,7 +1,7 @@
 use super::{App, Destination, Drawer, Message, SEARCH_ID};
 use crate::{
     features::{feed, post},
-    shared::presentation::community_handle,
+    shared::presentation::{community_handle, toggle_button_class},
 };
 use cosmic::{
     Element,
@@ -42,7 +42,7 @@ impl App {
                     } else {
                         "Compact feed spacing"
                     })
-                    .selected(self.compact)
+                    .class(toggle_button_class(self.compact, button::ButtonClass::Icon))
                     .on_press(Message::ToggleDensity)
                     .into(),
             );
@@ -224,10 +224,15 @@ impl App {
                                 SubscribedType::Pending => "Cancel pending subscription",
                             };
                             actions = actions.push(
-                                button::suggested(label).on_press_maybe(
-                                    (self.pending_follow.is_none() && !self.accounts.busy)
-                                        .then_some(Message::FollowCommunity),
-                                ),
+                                button::standard(label)
+                                    .class(toggle_button_class(
+                                        view.subscribed == SubscribedType::Subscribed,
+                                        button::ButtonClass::Standard,
+                                    ))
+                                    .on_press_maybe(
+                                        (self.pending_follow.is_none() && !self.accounts.busy)
+                                            .then_some(Message::FollowCommunity),
+                                    ),
                             );
                         }
                         actions = actions.push(

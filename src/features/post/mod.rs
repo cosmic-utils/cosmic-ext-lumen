@@ -2,20 +2,21 @@
 mod service;
 mod thread;
 mod view;
+pub(crate) use service::get_post;
 pub(crate) use view::render_markdown;
 
 pub const SCROLL_ID: &str = "lemmy-discussion";
 
 use crate::shared::{api::Api, links::open_web_link};
 use cosmic::{
-    iced::Task,
+    iced::{Task, clipboard, widget::operation},
     widget::{markdown, text_editor},
 };
 use lemmy_api_common::{
     comment::GetCommentsResponse,
     lemmy_db_schema::{
         CommentSortType,
-        newtypes::{CommentId, CommunityId, PostId},
+        newtypes::{CommentId, CommunityId, PersonId, PostId},
     },
     lemmy_db_views::structs::{CommentView, PostView},
 };
@@ -27,10 +28,17 @@ pub struct Comment {
     pub path: Vec<i32>,
 }
 
+impl Comment {
+    fn parent(&self) -> Option<CommentId> {
+        self.path.iter().rev().nth(1).copied().map(CommentId)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommentTarget {
     Post,
     Reply(CommentId),
+    Edit(CommentId),
 }
 
 #[derive(Default)]
@@ -44,6 +52,7 @@ struct DiscussionDrafts {
     composer_open: bool,
     replies: HashMap<CommentId, Composer>,
     active_reply: Option<CommentId>,
+    edit: Option<(CommentId, Composer)>,
 }
 
 #[derive(Default)]
@@ -58,17 +67,19 @@ pub struct Post {
     page: i64,
     generation: u64,
     api: Option<Api>,
+    person_id: Option<PersonId>,
     pending_action: Option<(u64, PostId)>,
     action_error: Option<String>,
     composer: Composer,
     replies: HashMap<CommentId, Composer>,
     active_reply: Option<CommentId>,
+    edit: Option<(CommentId, Composer)>,
     submitting: Option<(u64, PostId, CommentTarget)>,
     drafts: HashMap<PostId, DiscussionDrafts>,
     composer_open: bool,
     sort: usize,
-    voting: Option<(u64, CommentId)>,
-    vote_error: Option<(CommentId, String)>,
+    comment_action: Option<PendingCommentAction>,
+    comment_action_error: Option<(CommentId, String)>,
     pub focused_comment: Option<CommentId>,
     focus_error: Option<String>,
     link_error: Option<String>,
@@ -79,6 +90,25 @@ pub enum Action {
     Upvote,
     Downvote,
     ToggleSaved,
+}
+
+enum CommentAction {
+    Vote(i16),
+    Save(bool),
+    SetDeleted(bool),
+}
+
+struct PendingCommentAction {
+    generation: u64,
+    post: PostId,
+    comment: CommentId,
+    refresh_saved: bool,
+}
+
+enum CommentCommand {
+    Vote(i16),
+    ToggleSaved,
+    ToggleDeleted,
 }
 
 #[derive(Clone, Debug)]
@@ -102,8 +132,14 @@ pub enum Message {
     SubmitComment(u64, CommentTarget),
     CommentSubmitted(u64, Result<Box<CommentView>, String>),
     Vote(u64, CommentId, i16),
-    VoteFinished(u64, Result<Box<CommentView>, String>),
-    FocusLoaded(u64, Result<Box<CommentView>, String>),
+    SaveComment(u64, CommentId),
+    OpenEdit(u64, CommentId),
+    CancelEdit(u64, CommentId),
+    DeleteComment(u64, CommentId),
+    CommentActionFinished(u64, Result<Box<CommentView>, String>),
+    JumpToParent(u64, CommentId),
+    CopyPermalink(String),
+    FocusLoaded(u64, CommentId, Result<Box<CommentView>, String>),
 }
 
 const COMMENT_SORTS: [CommentSortType; 3] = [
@@ -120,6 +156,7 @@ impl Post {
             self.composer_open = drafts.composer_open;
             self.replies = drafts.replies;
             self.active_reply = drafts.active_reply;
+            self.edit = drafts.edit;
         }
         self.api = Some(api);
         self.set_selected(post);
@@ -128,32 +165,50 @@ impl Post {
     }
 
     pub fn open_at(&mut self, api: Api, post: PostView, comment: CommentId) -> Task<Message> {
-        let post_id = post.post.id;
-        let load = self.open(api.clone(), post);
-        self.focused_comment = Some(comment);
+        let load = self.open(api, post);
+        Task::batch([load, self.focus_comment(comment)])
+    }
+
+    fn focus_comment(&mut self, id: CommentId) -> Task<Message> {
+        let (Some(api), Some(post)) = (self.api.clone(), &self.selected) else {
+            return Task::none();
+        };
+        self.focused_comment = Some(id);
+        self.focus_error = None;
+        self.collapsed.remove(&id.0);
+        if self
+            .comments
+            .iter()
+            .any(|comment| comment.data.comment.id == id)
+        {
+            return Task::none();
+        }
         let generation = self.generation;
-        Task::batch([
-            load,
-            Task::perform(service::get_comment(api, comment, post_id), move |result| {
-                Message::FocusLoaded(generation, result.map(Box::new))
-            }),
-        ])
+        Task::perform(service::get_comment(api, id, post.post.id), move |result| {
+            Message::FocusLoaded(generation, id, result.map(Box::new))
+        })
+    }
+
+    pub fn set_person(&mut self, person_id: Option<PersonId>) {
+        self.person_id = person_id;
     }
 
     pub fn reset(&mut self) {
         self.close();
         self.pending_action = None;
-        self.voting = None;
+        self.comment_action = None;
         self.submitting = None;
         self.drafts.clear();
+        self.person_id = None;
     }
 
     pub fn close(&mut self) {
         let composer = std::mem::take(&mut self.composer);
+        let edit = self.edit.take();
         let mut replies = std::mem::take(&mut self.replies);
         replies.retain(|_, reply| !reply.draft.text().trim().is_empty());
         if let Some(post) = &self.selected
-            && (!composer.draft.text().trim().is_empty() || !replies.is_empty())
+            && (!composer.draft.text().trim().is_empty() || !replies.is_empty() || edit.is_some())
         {
             self.drafts.insert(
                 post.post.id,
@@ -162,6 +217,7 @@ impl Post {
                     composer_open: self.composer_open,
                     active_reply: self.active_reply.filter(|id| replies.contains_key(id)),
                     replies,
+                    edit,
                 },
             );
         }
@@ -177,7 +233,7 @@ impl Post {
         self.action_error = None;
         self.active_reply = None;
         self.composer_open = false;
-        self.vote_error = None;
+        self.comment_action_error = None;
         self.focused_comment = None;
         self.focus_error = None;
         self.link_error = None;
@@ -215,6 +271,11 @@ impl Post {
             CommentTarget::Post => Some(&mut self.composer),
             CommentTarget::Reply(id) if self.active_reply == Some(id) => self.replies.get_mut(&id),
             CommentTarget::Reply(_) => None,
+            CommentTarget::Edit(id) => self
+                .edit
+                .as_mut()
+                .filter(|(current, _)| *current == id)
+                .map(|(_, composer)| composer),
         }
     }
 
@@ -228,7 +289,32 @@ impl Post {
         let (Some(api), Some(post)) = (&self.api, &self.selected) else {
             return Task::none();
         };
-        if !api.is_authenticated() || post.post.locked || post.post.deleted || post.post.removed {
+        if !api.is_authenticated()
+            || match target {
+                CommentTarget::Edit(id) => {
+                    self.comment_action.is_some()
+                        || !self.comments.iter().any(|comment| {
+                            comment.data.comment.id == id
+                                && self.owns_comment(comment)
+                                && !comment.data.comment.deleted
+                        })
+                }
+                CommentTarget::Reply(id) => {
+                    self.comment_action
+                        .as_ref()
+                        .is_some_and(|pending| pending.comment == id)
+                        || !self.comments.iter().any(|comment| {
+                            comment.data.comment.id == id
+                                && !comment.data.comment.deleted
+                                && !comment.data.comment.removed
+                        })
+                        || post.post.locked
+                        || post.post.deleted
+                        || post.post.removed
+                }
+                CommentTarget::Post => post.post.locked || post.post.deleted || post.post.removed,
+            }
+        {
             return Task::none();
         }
         let (api, post_id) = (api.clone(), post.post.id);
@@ -245,6 +331,10 @@ impl Post {
             service::create_comment(api, post_id, target, content),
             move |result| Message::CommentSubmitted(generation, result.map(Box::new)),
         )
+    }
+
+    pub fn editing_submission(&self, generation: u64) -> bool {
+        matches!(self.submitting, Some((request, _, CommentTarget::Edit(_))) if request == generation)
     }
 
     pub fn finish_comment(
@@ -271,6 +361,14 @@ impl Post {
                         drafts.replies.remove(&id);
                         drafts.active_reply = None;
                     }
+                    (CommentTarget::Edit(_), Ok(_)) => drafts.edit = None,
+                    (CommentTarget::Edit(id), Err(error)) => {
+                        if let Some((_, composer)) =
+                            drafts.edit.as_mut().filter(|(current, _)| *current == id)
+                        {
+                            composer.error = Some(error.clone());
+                        }
+                    }
                     (CommentTarget::Post, Err(error)) => {
                         drafts.composer.error = Some(error.clone())
                     }
@@ -281,7 +379,9 @@ impl Post {
                     }
                 }
             }
-            return result.ok().map(|_| post_id);
+            return result
+                .ok()
+                .and_then(|_| (!matches!(target, CommentTarget::Edit(_))).then_some(post_id));
         }
         match result {
             Ok(comment) => {
@@ -289,6 +389,11 @@ impl Post {
                     CommentTarget::Post => {
                         self.composer = Composer::default();
                         self.composer_open = false;
+                    }
+                    CommentTarget::Edit(_) => {
+                        self.edit = None;
+                        self.replace_comment(*comment);
+                        return None;
                     }
                     CommentTarget::Reply(id) => {
                         self.replies.remove(&id);
@@ -355,11 +460,20 @@ impl Post {
         });
     }
 
-    fn vote(&mut self, generation: u64, id: CommentId, direction: i16) -> Task<Message> {
-        let Some(api) = self.api.as_ref().filter(|api| api.is_authenticated()) else {
+    fn act_on_comment(
+        &mut self,
+        generation: u64,
+        id: CommentId,
+        command: CommentCommand,
+    ) -> Task<Message> {
+        let (Some(api), Some(post)) = (&self.api, &self.selected) else {
             return Task::none();
         };
-        if generation != self.generation || self.voting.is_some() || !matches!(direction, -1 | 1) {
+        if !api.is_authenticated()
+            || generation != self.generation
+            || self.comment_action.is_some()
+            || self.submitting_target() == Some(CommentTarget::Edit(id))
+        {
             return Task::none();
         }
         let Some(comment) = self
@@ -369,16 +483,106 @@ impl Post {
         else {
             return Task::none();
         };
-        let score = if comment.data.my_vote == Some(direction) {
-            0
-        } else {
-            direction
+        let available = !comment.data.comment.deleted && !comment.data.comment.removed;
+        let action = match command {
+            CommentCommand::Vote(vote @ (-1 | 1)) if available => {
+                CommentAction::Vote(if comment.data.my_vote == Some(vote) {
+                    0
+                } else {
+                    vote
+                })
+            }
+            CommentCommand::ToggleSaved if available || comment.data.saved => {
+                CommentAction::Save(!comment.data.saved)
+            }
+            CommentCommand::ToggleDeleted
+                if self.owns_comment(comment) && self.submitting.is_none() =>
+            {
+                CommentAction::SetDeleted(!comment.data.comment.deleted)
+            }
+            _ => return Task::none(),
         };
-        self.voting = Some((generation, id));
-        self.vote_error = None;
-        Task::perform(service::vote(api.clone(), id, score), move |result| {
-            Message::VoteFinished(generation, result.map(Box::new))
-        })
+        let post_id = post.post.id;
+        let refresh_saved = match action {
+            CommentAction::Save(_) => true,
+            CommentAction::SetDeleted(_) => comment.data.saved,
+            CommentAction::Vote(_) => false,
+        };
+        self.comment_action = Some(PendingCommentAction {
+            generation,
+            post: post_id,
+            comment: id,
+            refresh_saved,
+        });
+        self.comment_action_error = None;
+        Task::perform(
+            service::act_on_comment(api.clone(), post_id, id, action),
+            move |result| Message::CommentActionFinished(generation, result.map(Box::new)),
+        )
+    }
+
+    pub fn finish_comment_action(
+        &mut self,
+        generation: u64,
+        result: Result<Box<CommentView>, String>,
+    ) -> bool {
+        let Some(PendingCommentAction {
+            post: post_id,
+            comment: id,
+            refresh_saved,
+            ..
+        }) = self
+            .comment_action
+            .as_ref()
+            .filter(|pending| pending.generation == generation)
+        else {
+            return false;
+        };
+        let (post_id, id, refresh_saved) = (*post_id, *id, *refresh_saved);
+        self.comment_action = None;
+        let selected = self
+            .selected
+            .as_ref()
+            .is_some_and(|post| post.post.id == post_id);
+        match result {
+            Ok(updated) => {
+                if selected {
+                    if updated.comment.deleted
+                        && self
+                            .edit
+                            .as_ref()
+                            .is_some_and(|(current, _)| *current == id)
+                    {
+                        self.edit = None;
+                    }
+                    self.replace_comment(*updated);
+                }
+                refresh_saved
+            }
+            Err(error) => {
+                if selected {
+                    self.comment_action_error = Some((id, error));
+                }
+                false
+            }
+        }
+    }
+
+    fn owns_comment(&self, comment: &Comment) -> bool {
+        self.person_id == Some(comment.data.comment.creator_id) && !comment.data.comment.removed
+    }
+
+    fn replace_comment(&mut self, data: CommentView) {
+        if let Some(comment) = self
+            .comments
+            .iter_mut()
+            .find(|item| item.data.comment.id == data.comment.id)
+        {
+            *comment = Self::parse_comment(data);
+        } else {
+            self.comments.push(Self::parse_comment(data));
+            self.sort_comments();
+        }
     }
 
     fn add_comment(&mut self, data: CommentView) {
@@ -389,6 +593,10 @@ impl Post {
         {
             return;
         }
+        self.comments.push(Self::parse_comment(data));
+    }
+
+    fn parse_comment(data: CommentView) -> Comment {
         let text = if data.comment.deleted {
             "[deleted]"
         } else if data.comment.removed {
@@ -396,11 +604,11 @@ impl Post {
         } else {
             &data.comment.content
         };
-        self.comments.push(Comment {
+        Comment {
             body: markdown::Content::parse(text),
             path: thread::path_ids(&data.comment.path),
             data,
-        });
+        }
     }
 
     pub fn finish_action(
@@ -443,28 +651,67 @@ impl Post {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Act(generation, action) => return self.act(generation, action),
-            Message::Vote(generation, id, score) => return self.vote(generation, id, score),
-            Message::VoteFinished(generation, result) => {
-                if let Some((_, id)) = self.voting.filter(|(pending, _)| *pending == generation) {
-                    self.voting = None;
-                    if generation == self.generation {
-                        match result {
-                            Ok(updated) => {
-                                if let Some(comment) = self
-                                    .comments
-                                    .iter_mut()
-                                    .find(|comment| comment.data.comment.id == id)
-                                {
-                                    comment.data.counts = updated.counts;
-                                    comment.data.my_vote = updated.my_vote;
-                                }
-                            }
-                            Err(error) => self.vote_error = Some((id, error)),
-                        }
-                    }
+            Message::Vote(generation, id, score) => {
+                return self.act_on_comment(generation, id, CommentCommand::Vote(score));
+            }
+            Message::SaveComment(generation, id) => {
+                return self.act_on_comment(generation, id, CommentCommand::ToggleSaved);
+            }
+            Message::DeleteComment(generation, id) => {
+                return self.act_on_comment(generation, id, CommentCommand::ToggleDeleted);
+            }
+            Message::OpenEdit(generation, id)
+                if generation == self.generation
+                    && self.edit.is_none()
+                    && self.api.as_ref().is_some_and(Api::is_authenticated) =>
+            {
+                if let Some(comment) = self.comments.iter().find(|comment| {
+                    comment.data.comment.id == id
+                        && self.owns_comment(comment)
+                        && !comment.data.comment.deleted
+                }) {
+                    self.edit = Some((
+                        id,
+                        Composer {
+                            draft: text_editor::Content::with_text(&comment.data.comment.content),
+                            error: None,
+                        },
+                    ));
                 }
             }
-            Message::FocusLoaded(generation, result) if generation == self.generation => {
+            Message::CancelEdit(generation, id)
+                if generation == self.generation
+                    && self.submitting_target() != Some(CommentTarget::Edit(id))
+                    && self
+                        .edit
+                        .as_ref()
+                        .is_some_and(|(current, _)| *current == id) =>
+            {
+                self.edit = None;
+            }
+            Message::CopyPermalink(url) => return clipboard::write(url),
+            Message::JumpToParent(generation, id) if generation == self.generation => {
+                let parent = self
+                    .comments
+                    .iter()
+                    .find(|comment| comment.data.comment.id == id)
+                    .and_then(|comment| comment.parent());
+                if let Some(parent) = parent {
+                    return Task::batch([
+                        self.focus_comment(parent),
+                        operation::scroll_to(
+                            SCROLL_ID,
+                            operation::AbsoluteOffset {
+                                x: Some(0.0),
+                                y: Some(0.0),
+                            },
+                        ),
+                    ]);
+                }
+            }
+            Message::FocusLoaded(generation, id, result)
+                if generation == self.generation && self.focused_comment == Some(id) =>
+            {
                 match result {
                     Ok(comment) => {
                         self.add_comment(*comment);
@@ -476,7 +723,7 @@ impl Post {
             Message::Sort(sort)
                 if !self.busy
                     && self.submitting.is_none()
-                    && self.voting.is_none()
+                    && self.comment_action.is_none()
                     && sort < COMMENT_SORTS.len()
                     && sort != self.sort =>
             {
@@ -591,7 +838,7 @@ pub(crate) mod tests {
         .unwrap()
     }
 
-    pub(super) fn comment_view(post: &PostView, text: &str) -> CommentView {
+    pub(crate) fn comment_view(post: &PostView, text: &str) -> CommentView {
         let published = "2024-01-01T00:00:00Z";
         serde_json::from_value(json!({
             "comment": {
@@ -659,11 +906,12 @@ pub(crate) mod tests {
         let mut task =
             runtime::task::into_stream(post.update(Message::Vote(post.generation, id, 1))).unwrap();
         assert_eq!(post.comments[0].data.my_vote, Some(1));
-        let Some(runtime::Action::Output(message @ Message::VoteFinished(..))) = task.next().await
+        let Some(runtime::Action::Output(Message::CommentActionFinished(generation, result))) =
+            task.next().await
         else {
             panic!("vote did not finish");
         };
-        let _ = post.update(message);
+        post.finish_comment_action(generation, result);
         assert_eq!(post.comments[0].data.my_vote, Some(0));
         assert_eq!(post.comments[0].data.counts.score, 0);
         let request = request.await.unwrap();
@@ -674,6 +922,96 @@ pub(crate) mod tests {
             serde_json::from_str::<Value>(payload).unwrap(),
             json!({"comment_id": 42, "score": 0})
         );
+    }
+
+    #[tokio::test]
+    async fn comment_changes_use_owner_and_server_confirmed_state() {
+        let selected = post_view();
+        let original = comment_view(&selected, "Original");
+        let id = original.comment.id;
+        let mut updated = original.clone();
+        let mut post = Post::default();
+
+        for (path, payload) in [
+            (
+                "PUT /api/v3/comment/save",
+                json!({"comment_id": 42, "save": true}),
+            ),
+            (
+                "PUT /api/v3/comment",
+                json!({"comment_id": 42, "content": "Edited"}),
+            ),
+            (
+                "POST /api/v3/comment/delete",
+                json!({"comment_id": 42, "deleted": true}),
+            ),
+            (
+                "POST /api/v3/comment/delete",
+                json!({"comment_id": 42, "deleted": false}),
+            ),
+            (
+                "PUT /api/v3/comment/save",
+                json!({"comment_id": 42, "save": false}),
+            ),
+        ] {
+            let previous = updated.clone();
+            if let Some(saved) = payload["save"].as_bool() {
+                updated.saved = saved;
+            } else if let Some(deleted) = payload["deleted"].as_bool() {
+                updated.comment.deleted = deleted;
+            } else {
+                updated.comment.content = "Edited".into();
+            }
+
+            let response = json!({"comment_view": updated, "recipient_ids": []}).to_string();
+            let (api, request) = serve("200 OK", &response).await;
+            let _ = post.open(api.authenticated("reader".into()), selected.clone());
+            post.add_comment(previous.clone());
+            let generation = post.generation;
+
+            post.set_person(Some(PersonId(99)));
+            let _ = post.update(Message::OpenEdit(generation, id));
+            assert!(post.edit.is_none());
+            assert!(
+                runtime::task::into_stream(post.update(Message::DeleteComment(generation, id)))
+                    .is_none()
+            );
+
+            post.set_person(Some(original.comment.creator_id));
+            let message = if payload.get("save").is_some() {
+                Message::SaveComment(generation, id)
+            } else if payload.get("deleted").is_some() {
+                Message::DeleteComment(generation, id)
+            } else {
+                let _ = post.update(Message::OpenEdit(generation, id));
+                let composer = post.composer_mut(CommentTarget::Edit(id)).unwrap();
+                assert_eq!(composer.draft.text(), "Original");
+                composer.draft = text_editor::Content::with_text("Edited");
+                Message::SubmitComment(generation, CommentTarget::Edit(id))
+            };
+            let mut task = runtime::task::into_stream(post.update(message)).unwrap();
+            assert_eq!(post.comments[0].data, previous);
+            match task.next().await {
+                Some(runtime::Action::Output(Message::CommentActionFinished(
+                    generation,
+                    result,
+                ))) => {
+                    post.finish_comment_action(generation, result);
+                }
+                Some(runtime::Action::Output(Message::CommentSubmitted(generation, result))) => {
+                    assert_eq!(post.finish_comment(generation, result), None);
+                    assert!(post.edit.is_none());
+                    assert_eq!(post.selected.as_ref().unwrap().counts.comments, 0);
+                }
+                _ => panic!("comment change did not finish"),
+            }
+            assert_eq!(post.comments[0].data, updated);
+
+            let request = request.await.unwrap();
+            assert!(request.starts_with(&format!("{path} HTTP/1.1")));
+            let (_, body) = request.split_once("\r\n\r\n").unwrap();
+            assert_eq!(serde_json::from_str::<Value>(body).unwrap(), payload);
+        }
     }
 
     #[tokio::test]

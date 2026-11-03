@@ -67,6 +67,15 @@ fn text_input_style(theme: &cosmic::Theme, status: text_editor::Status) -> text_
     }
 }
 
+/// Use the theme's accent fill to keep an active toggle visible at rest.
+pub fn toggle_button_class(active: bool, inactive: button::ButtonClass) -> button::ButtonClass {
+    if active {
+        button::ButtonClass::Suggested
+    } else {
+        inactive
+    }
+}
+
 pub fn selectable_card<'a, Message: Clone + 'static>(
     content: impl Into<Element<'a, Message>>,
     padding: u16,

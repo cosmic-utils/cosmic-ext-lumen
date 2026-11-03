@@ -43,6 +43,7 @@ impl App {
         }
         self.instance.input = api.base.to_string();
         self.post.reset();
+        self.post.set_person(self.accounts.person_id());
         self.publish = publish::Publish::default();
         self.pending_follow = None;
         self.destination = Destination::Feed;
@@ -104,20 +105,24 @@ impl App {
     }
 
     pub(super) fn update_feed(&mut self, message: feed::Message) -> Task<Message> {
-        let reset_scroll = matches!(message, feed::Message::Sort(_) | feed::Message::Refresh);
+        let reset_scroll = matches!(
+            message,
+            feed::Message::Sort(_) | feed::Message::Refresh | feed::Message::SavedTab(_)
+        );
         if reset_scroll {
             self.feed_offset = 0.0;
         }
         let (task, selected) = self.feed.update(message);
         let task = task.map(Message::Feed).map(cosmic::Action::App);
-        if let Some(post) = selected.filter(|_| self.destination == Destination::Feed)
-            && self
-                .post
-                .selected
-                .as_ref()
-                .is_none_or(|current| current.post.id != post.post.id)
+        if let Some((post, comment)) = selected.filter(|_| self.destination == Destination::Feed)
+            && (comment.is_some()
+                || self
+                    .post
+                    .selected
+                    .as_ref()
+                    .is_none_or(|current| current.post.id != post.post.id))
         {
-            return Task::batch([task, self.open_post(post, None)]);
+            return Task::batch([task, self.open_post(post, comment)]);
         }
         if reset_scroll && self.destination == Destination::Feed {
             Task::batch([task, self.restore_feed_scroll()])
@@ -192,16 +197,39 @@ impl App {
                 }
                 Task::none()
             }
-            post::Message::Act(..) | post::Message::SubmitComment(..) | post::Message::Vote(..)
+            post::Message::Act(..)
+            | post::Message::SubmitComment(..)
+            | post::Message::Vote(..)
+            | post::Message::SaveComment(..)
+            | post::Message::DeleteComment(..)
                 if self.accounts.busy =>
             {
                 Task::none()
             }
+            post::Message::CommentActionFinished(generation, result) => {
+                if self.post.finish_comment_action(generation, result) {
+                    self.feed
+                        .saved_comments_changed()
+                        .map(Message::Feed)
+                        .map(cosmic::Action::App)
+                } else {
+                    Task::none()
+                }
+            }
             post::Message::CommentSubmitted(generation, result) => {
+                let edited_saved_comment = self.post.editing_submission(generation)
+                    && result.as_ref().is_ok_and(|comment| comment.saved);
                 if let Some(id) = self.post.finish_comment(generation, result) {
                     self.feed.comment_added(id);
                 }
-                Task::none()
+                if edited_saved_comment {
+                    self.feed
+                        .saved_comments_changed()
+                        .map(Message::Feed)
+                        .map(cosmic::Action::App)
+                } else {
+                    Task::none()
+                }
             }
             post::Message::ActionFinished(generation, result) => {
                 if let Some(updated) = self.post.finish_action(generation, result) {

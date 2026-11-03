@@ -19,7 +19,6 @@ use lemmy_api_common::{
         GetRepliesResponse, GetUnreadCountResponse, MarkCommentReplyAsRead,
         MarkPersonMentionAsRead, PersonMentionResponse,
     },
-    post::{GetPost, GetPostResponse},
 };
 
 const PAGE_SIZE: i64 = 20;
@@ -318,18 +317,7 @@ async fn open(
     api: Api,
     notice: Notice,
 ) -> Result<(Box<PostView>, CommentId, Option<String>), String> {
-    let response: GetPostResponse = api
-        .get(
-            "post",
-            &GetPost {
-                id: Some(notice.post),
-                comment_id: None,
-            },
-        )
-        .await?;
-    if response.post_view.post.id != notice.post {
-        return Err("The instance returned a different post.".into());
-    }
+    let post = super::post::get_post(&api, notice.post).await?;
     let mut error = None;
     if !notice.read {
         error = match notice.id {
@@ -355,5 +343,5 @@ async fn open(
                 .err(),
         };
     }
-    Ok((Box::new(response.post_view), notice.comment, error))
+    Ok((Box::new(post), notice.comment, error))
 }

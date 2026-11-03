@@ -3,14 +3,14 @@ mod service;
 mod view;
 pub use view::SCROLL_ID;
 
-use crate::shared::api::Api;
+use crate::{features::post, shared::api::Api};
 use cosmic::iced::Task;
 use lemmy_api_common::{
     lemmy_db_schema::{
         SortType,
-        newtypes::{CommunityId, PostId},
+        newtypes::{CommentId, CommunityId, PostId},
     },
-    lemmy_db_views::structs::{PaginationCursor, PostView},
+    lemmy_db_views::structs::{CommentView, PaginationCursor, PostView},
     post::GetPostsResponse,
 };
 
@@ -73,8 +73,12 @@ pub struct Feed {
     generation: u64,
     api: Option<Api>,
     query: String,
-    search_page: i64,
-    search_more: bool,
+    page: i64,
+    page_more: bool,
+    show_saved_comments: bool,
+    saved_comments: Vec<CommentView>,
+    opening_comment: Option<CommentId>,
+    open_error: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -85,7 +89,11 @@ pub enum Message {
     Scope(Scope),
     Search(String),
     CommunityDetails(CommunityId),
+    SavedTab(usize),
     Open(i32),
+    OpenComment(CommentId),
+    CommentOpened(u64, CommentId, Result<Box<PostView>, String>),
+    SavedCommentsLoaded(u64, Result<Vec<CommentView>, String>),
     Scrolled(f32),
     Loaded(u64, bool, Result<GetPostsResponse, String>),
     SearchLoaded(u64, bool, Result<Vec<PostView>, String>),
@@ -99,6 +107,7 @@ impl Feed {
             self.scope = Scope::All;
         }
         self.api = Some(api);
+        self.show_saved_comments = false;
         self.reload()
     }
 
@@ -113,9 +122,12 @@ impl Feed {
     fn reload(&mut self) -> Task<Message> {
         self.generation += 1;
         self.posts.clear();
+        self.saved_comments.clear();
+        self.opening_comment = None;
+        self.open_error = None;
         self.cursor = None;
-        self.search_page = 1;
-        self.search_more = false;
+        self.page = 1;
+        self.page_more = false;
         self.loaded = false;
         self.request(false)
     }
@@ -127,9 +139,14 @@ impl Feed {
         self.busy = true;
         self.error = None;
         let generation = self.generation;
+        if self.viewing_saved_comments() {
+            return Task::perform(service::saved_comments(api, self.page), move |result| {
+                Message::SavedCommentsLoaded(generation, result)
+            });
+        }
         if self.scope == Scope::Search {
             return Task::perform(
-                service::search(api, self.query.clone(), self.sort, self.search_page),
+                service::search(api, self.query.clone(), self.sort, self.page),
                 move |result| Message::SearchLoaded(generation, append, result),
             );
         }
@@ -140,7 +157,10 @@ impl Feed {
         )
     }
 
-    pub fn update(&mut self, message: Message) -> (Task<Message>, Option<PostView>) {
+    pub fn update(
+        &mut self,
+        message: Message,
+    ) -> (Task<Message>, Option<(PostView, Option<CommentId>)>) {
         match message {
             Message::Refresh => return (self.reload(), None),
             Message::More if !self.busy && self.has_more() => {
@@ -162,10 +182,72 @@ impl Feed {
                 self.scope = Scope::Search;
                 return (self.reload(), None);
             }
+            Message::SavedTab(index) if self.scope == Scope::Saved && index < 2 => {
+                let show_comments = index == 1;
+                if self.show_saved_comments != show_comments {
+                    self.show_saved_comments = show_comments;
+                    return (self.reload(), None);
+                }
+            }
+            Message::OpenComment(id) if self.viewing_saved_comments() => {
+                let (Some(api), Some(comment)) = (
+                    self.api.clone(),
+                    self.saved_comments
+                        .iter()
+                        .find(|item| item.comment.id == id),
+                ) else {
+                    return (Task::none(), None);
+                };
+                self.opening_comment = Some(id);
+                self.open_error = None;
+                let generation = self.generation;
+                let post_id = comment.post.id;
+                return (
+                    Task::perform(
+                        async move { post::get_post(&api, post_id).await.map(Box::new) },
+                        move |result| Message::CommentOpened(generation, id, result),
+                    ),
+                    None,
+                );
+            }
+            Message::CommentOpened(generation, id, result)
+                if generation == self.generation && self.opening_comment == Some(id) =>
+            {
+                self.opening_comment = None;
+                match result {
+                    Ok(post) => return (Task::none(), Some((*post, Some(id)))),
+                    Err(error) => self.open_error = Some(error),
+                }
+            }
+            Message::SavedCommentsLoaded(generation, result) if generation == self.generation => {
+                self.busy = false;
+                match result {
+                    Ok(comments) => {
+                        self.loaded = true;
+                        self.page_more = comments.len() == service::PAGE_SIZE as usize;
+                        self.page += 1;
+                        for comment in comments {
+                            if comment.saved
+                                && !self
+                                    .saved_comments
+                                    .iter()
+                                    .any(|item| item.comment.id == comment.comment.id)
+                            {
+                                self.saved_comments.push(comment);
+                            }
+                        }
+                    }
+                    Err(error) => self.error = Some(error),
+                }
+            }
             Message::Open(id) => {
                 return (
                     Task::none(),
-                    self.posts.iter().find(|p| p.post.id.0 == id).cloned(),
+                    self.posts
+                        .iter()
+                        .find(|p| p.post.id.0 == id)
+                        .cloned()
+                        .map(|post| (post, None)),
                 );
             }
             Message::Loaded(generation, append, result) if generation == self.generation => {
@@ -182,8 +264,8 @@ impl Feed {
                 self.busy = false;
                 match result {
                     Ok(posts) => {
-                        self.search_more = posts.len() == service::PAGE_SIZE as usize;
-                        self.search_page += 1;
+                        self.page_more = posts.len() == service::PAGE_SIZE as usize;
+                        self.page += 1;
                         self.apply_posts(posts.into_iter().filter(|post| !post.post.nsfw), append);
                     }
                     Err(error) => self.error = Some(error),
@@ -194,8 +276,19 @@ impl Feed {
         (Task::none(), None)
     }
 
+    fn viewing_saved_comments(&self) -> bool {
+        self.scope == Scope::Saved && self.show_saved_comments
+    }
+
+    pub fn saved_comments_changed(&mut self) -> Task<Message> {
+        if self.viewing_saved_comments() {
+            return self.reload();
+        }
+        Task::none()
+    }
+
     fn has_more(&self) -> bool {
-        self.cursor.is_some() || self.search_more
+        self.cursor.is_some() || self.page_more
     }
 
     fn apply_posts(&mut self, posts: impl IntoIterator<Item = PostView>, append: bool) {
@@ -240,7 +333,10 @@ impl Feed {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{features::post::tests::post_view, shared::api::tests::serve};
+    use crate::{
+        features::post::tests::{comment_view, post_view},
+        shared::api::tests::serve,
+    };
     use cosmic::iced::{futures::StreamExt, runtime};
     use serde_json::json;
 
@@ -302,6 +398,36 @@ mod tests {
         assert_eq!(feed.scope, Scope::All);
     }
 
+    #[tokio::test]
+    async fn saved_comments_are_account_scoped_and_open_their_discussion() {
+        let post = post_view();
+        let mut comment = comment_view(&post, "Saved reply");
+        comment.saved = true;
+        let response = json!({"comments": [comment]}).to_string();
+        let (api, request) = serve("200 OK", &response).await;
+        let mut feed = Feed::default();
+        let _ = feed.connect(api.authenticated("reader".into()));
+        let _ = feed.update(Message::Scope(Scope::Saved));
+        let (task, _) = feed.update(Message::SavedTab(1));
+        let loaded = loaded(task).await;
+        let _ = feed.update(loaded.clone());
+        assert_eq!(feed.saved_comments, vec![comment.clone()]);
+
+        let request = request.await.unwrap();
+        assert!(request.starts_with("GET /api/v3/comment/list?"));
+        assert!(request.contains("saved_only=true"));
+        assert!(request.contains("authorization: Bearer reader\r\n"));
+
+        let id = comment.comment.id;
+        let _ = feed.update(Message::OpenComment(id));
+        let opened = Message::CommentOpened(feed.generation, id, Ok(Box::new(post.clone())));
+        assert_eq!(feed.update(opened.clone()).1, Some((post, Some(id))));
+        let _ = feed.connect(Api::new(reqwest::Client::new(), "example.com").unwrap());
+        let _ = feed.update(loaded);
+        assert!(feed.saved_comments.is_empty());
+        assert!(feed.update(opened).1.is_none());
+    }
+
     #[test]
     fn ignores_response_from_previous_feed() {
         let mut feed = Feed {
@@ -331,7 +457,10 @@ mod tests {
         let (task, _) = feed.update(Message::Search("split reading".into()));
         let _ = feed.update(loaded(task).await);
         assert_eq!(feed.scope(), Scope::Search);
-        assert_eq!(feed.update(Message::Open(post.post.id.0)).1, Some(post));
+        assert_eq!(
+            feed.update(Message::Open(post.post.id.0)).1,
+            Some((post, None))
+        );
         let request = request.await.unwrap();
         let line = request.lines().next().unwrap();
         assert!(line.starts_with("GET /api/v3/search?"));
