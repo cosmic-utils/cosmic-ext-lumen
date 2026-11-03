@@ -18,17 +18,16 @@ impl App {
             return Vec::new();
         }
         let width = (self.width - 200.0).clamp(110.0, 330.0);
-        let search = widget::text_input("Search posts", &self.search)
+        let search = widget::search_input("Search posts", &self.search)
             .id(SEARCH_ID.into())
             .width(Length::Fixed(width))
-            .leading_icon(
-                icon::from_name("system-search-symbolic")
-                    .size(16)
-                    .icon()
-                    .into(),
-            )
             .on_input(Message::SearchInput)
             .on_submit(|_| Message::Search);
+        let search = if self.search.is_empty() {
+            search
+        } else {
+            search.on_clear(Message::SearchInput(String::new()))
+        };
         vec![search.into()]
     }
 

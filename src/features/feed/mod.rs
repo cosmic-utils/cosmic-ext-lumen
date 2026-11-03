@@ -7,11 +7,14 @@ use crate::{features::post, shared::api::Api};
 use cosmic::iced::Task;
 use lemmy_api_common::{
     lemmy_db_schema::{
-        SortType,
+        ListingType, SearchType, SortType,
         newtypes::{CommentId, CommunityId, PostId},
+        source::community::Community,
     },
     lemmy_db_views::structs::{CommentView, PaginationCursor, PostView},
+    lemmy_db_views_actor::structs::CommunityView,
     post::GetPostsResponse,
+    site::{Search, SearchResponse},
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -73,12 +76,32 @@ pub struct Feed {
     generation: u64,
     api: Option<Api>,
     query: String,
+    search_type: SearchKind,
+    search_community: Option<CommunityId>,
+    search_communities: Vec<Community>,
+    communities: Vec<CommunityView>,
     page: i64,
     page_more: bool,
     show_saved_comments: bool,
-    saved_comments: Vec<CommentView>,
+    comments: Vec<CommentView>,
     opening_comment: Option<CommentId>,
     open_error: Option<String>,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum SearchKind {
+    #[default]
+    Posts,
+    Comments,
+    Communities,
+}
+
+impl SearchKind {
+    const OPTIONS: [Self; 3] = [Self::Posts, Self::Comments, Self::Communities];
+
+    fn index(self) -> usize {
+        self as usize
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -87,7 +110,10 @@ pub enum Message {
     More,
     Sort(usize),
     Scope(Scope),
-    Search(String),
+    Search(String, Option<CommunityId>),
+    SearchKind(usize),
+    SearchCommunity(usize),
+    OpenCommunity(CommunityId),
     CommunityDetails(CommunityId),
     SavedTab(usize),
     Open(i32),
@@ -96,7 +122,7 @@ pub enum Message {
     SavedCommentsLoaded(u64, Result<Vec<CommentView>, String>),
     Scrolled(f32),
     Loaded(u64, bool, Result<GetPostsResponse, String>),
-    SearchLoaded(u64, bool, Result<Vec<PostView>, String>),
+    SearchLoaded(u64, bool, Result<SearchResponse, String>),
 }
 
 impl Feed {
@@ -108,6 +134,9 @@ impl Feed {
         }
         self.api = Some(api);
         self.show_saved_comments = false;
+        self.search_type = SearchKind::Posts;
+        self.search_community = None;
+        self.search_communities.clear();
         self.reload()
     }
 
@@ -122,7 +151,8 @@ impl Feed {
     fn reload(&mut self) -> Task<Message> {
         self.generation += 1;
         self.posts.clear();
-        self.saved_comments.clear();
+        self.comments.clear();
+        self.communities.clear();
         self.opening_comment = None;
         self.open_error = None;
         self.cursor = None;
@@ -146,7 +176,25 @@ impl Feed {
         }
         if self.scope == Scope::Search {
             return Task::perform(
-                service::search(api, self.query.clone(), self.sort, self.page),
+                service::search(
+                    api,
+                    Search {
+                        q: self.query.clone(),
+                        type_: Some(match self.search_type {
+                            SearchKind::Posts => SearchType::Posts,
+                            SearchKind::Comments => SearchType::Comments,
+                            SearchKind::Communities => SearchType::Communities,
+                        }),
+                        community_id: self
+                            .search_community
+                            .filter(|_| self.search_type != SearchKind::Communities),
+                        listing_type: Some(ListingType::All),
+                        sort: Some(self.sort.api()),
+                        page: Some(self.page),
+                        limit: Some(service::PAGE_SIZE),
+                        ..Default::default()
+                    },
+                ),
                 move |result| Message::SearchLoaded(generation, append, result),
             );
         }
@@ -177,10 +225,34 @@ impl Feed {
                 self.scope = scope;
                 return (self.reload(), None);
             }
-            Message::Search(query) if !query.is_empty() && self.api.is_some() => {
+            Message::Search(query, community) if !query.is_empty() && self.api.is_some() => {
+                if self.scope != Scope::Search {
+                    self.search_type = SearchKind::Posts;
+                    self.search_community = community;
+                }
                 self.query = query;
                 self.scope = Scope::Search;
                 return (self.reload(), None);
+            }
+            Message::SearchKind(index) if self.scope == Scope::Search => {
+                if let Some(kind) = SearchKind::OPTIONS
+                    .get(index)
+                    .copied()
+                    .filter(|kind| *kind != self.search_type)
+                {
+                    self.search_type = kind;
+                    return (self.reload(), None);
+                }
+            }
+            Message::SearchCommunity(index) if self.scope == Scope::Search => {
+                let community = index
+                    .checked_sub(1)
+                    .and_then(|index| self.search_communities.get(index))
+                    .map(|community| community.id);
+                if community != self.search_community {
+                    self.search_community = community;
+                    return (self.reload(), None);
+                }
             }
             Message::SavedTab(index) if self.scope == Scope::Saved && index < 2 => {
                 let show_comments = index == 1;
@@ -189,12 +261,10 @@ impl Feed {
                     return (self.reload(), None);
                 }
             }
-            Message::OpenComment(id) if self.viewing_saved_comments() => {
+            Message::OpenComment(id) if self.viewing_comments() => {
                 let (Some(api), Some(comment)) = (
                     self.api.clone(),
-                    self.saved_comments
-                        .iter()
-                        .find(|item| item.comment.id == id),
+                    self.comments.iter().find(|item| item.comment.id == id),
                 ) else {
                     return (Task::none(), None);
                 };
@@ -226,16 +296,7 @@ impl Feed {
                         self.loaded = true;
                         self.page_more = comments.len() == service::PAGE_SIZE as usize;
                         self.page += 1;
-                        for comment in comments {
-                            if comment.saved
-                                && !self
-                                    .saved_comments
-                                    .iter()
-                                    .any(|item| item.comment.id == comment.comment.id)
-                            {
-                                self.saved_comments.push(comment);
-                            }
-                        }
+                        self.apply_comments(comments.into_iter().filter(|comment| comment.saved));
                     }
                     Err(error) => self.error = Some(error),
                 }
@@ -263,10 +324,44 @@ impl Feed {
             Message::SearchLoaded(generation, append, result) if generation == self.generation => {
                 self.busy = false;
                 match result {
-                    Ok(posts) => {
-                        self.page_more = posts.len() == service::PAGE_SIZE as usize;
+                    Ok(response) => {
+                        self.loaded = true;
+                        let count = match self.search_type {
+                            SearchKind::Posts => {
+                                let count = response.posts.len();
+                                self.apply_posts(
+                                    response
+                                        .posts
+                                        .into_iter()
+                                        .filter(|post| !post.post.nsfw && !post.community.nsfw),
+                                    append,
+                                );
+                                count
+                            }
+                            SearchKind::Comments => {
+                                let count = response.comments.len();
+                                self.apply_comments(response.comments.into_iter().filter(
+                                    |comment| !comment.post.nsfw && !comment.community.nsfw,
+                                ));
+                                count
+                            }
+                            SearchKind::Communities => {
+                                let count = response.communities.len();
+                                for view in response.communities {
+                                    if !view.community.nsfw
+                                        && !self
+                                            .communities
+                                            .iter()
+                                            .any(|item| item.community.id == view.community.id)
+                                    {
+                                        self.communities.push(view);
+                                    }
+                                }
+                                count
+                            }
+                        };
+                        self.page_more = count == service::PAGE_SIZE as usize;
                         self.page += 1;
-                        self.apply_posts(posts.into_iter().filter(|post| !post.post.nsfw), append);
                     }
                     Err(error) => self.error = Some(error),
                 }
@@ -274,6 +369,48 @@ impl Feed {
             _ => {}
         }
         (Task::none(), None)
+    }
+
+    pub fn set_search_communities(
+        &mut self,
+        communities: &[Community],
+        current: Option<&Community>,
+    ) {
+        self.search_communities = communities.to_vec();
+        if let Some(current) = current
+            && !self
+                .search_communities
+                .iter()
+                .any(|community| community.id == current.id)
+        {
+            self.search_communities.push(current.clone());
+        }
+        self.search_communities
+            .sort_by_key(|community| community.name.to_lowercase());
+    }
+
+    pub fn found_community(&self, id: CommunityId) -> Option<&Community> {
+        self.communities
+            .iter()
+            .map(|view| &view.community)
+            .find(|community| community.id == id)
+    }
+
+    fn viewing_comments(&self) -> bool {
+        self.viewing_saved_comments()
+            || (self.scope == Scope::Search && self.search_type == SearchKind::Comments)
+    }
+
+    fn apply_comments(&mut self, comments: impl IntoIterator<Item = CommentView>) {
+        for comment in comments {
+            if !self
+                .comments
+                .iter()
+                .any(|item| item.comment.id == comment.comment.id)
+            {
+                self.comments.push(comment);
+            }
+        }
     }
 
     fn viewing_saved_comments(&self) -> bool {
@@ -411,7 +548,7 @@ mod tests {
         let (task, _) = feed.update(Message::SavedTab(1));
         let loaded = loaded(task).await;
         let _ = feed.update(loaded.clone());
-        assert_eq!(feed.saved_comments, vec![comment.clone()]);
+        assert_eq!(feed.comments, vec![comment.clone()]);
 
         let request = request.await.unwrap();
         assert!(request.starts_with("GET /api/v3/comment/list?"));
@@ -424,7 +561,7 @@ mod tests {
         assert_eq!(feed.update(opened.clone()).1, Some((post, Some(id))));
         let _ = feed.connect(Api::new(reqwest::Client::new(), "example.com").unwrap());
         let _ = feed.update(loaded);
-        assert!(feed.saved_comments.is_empty());
+        assert!(feed.comments.is_empty());
         assert!(feed.update(opened).1.is_none());
     }
 
@@ -454,7 +591,7 @@ mod tests {
         let (api, request) = serve("200 OK", &body).await;
         let mut feed = Feed::default();
         let _ = feed.connect(api);
-        let (task, _) = feed.update(Message::Search("split reading".into()));
+        let (task, _) = feed.update(Message::Search("split reading".into(), None));
         let _ = feed.update(loaded(task).await);
         assert_eq!(feed.scope(), Scope::Search);
         assert_eq!(
@@ -472,5 +609,41 @@ mod tests {
         ] {
             assert!(line.contains(param), "{line}");
         }
+    }
+    #[tokio::test]
+    async fn comment_search_uses_the_selected_community_and_ignores_stale_results() {
+        let post = post_view();
+        let mut comment = comment_view(&post, "A matching comment");
+        comment.saved = false;
+        let body = json!({
+            "type_": "Comments",
+            "comments": [comment],
+            "posts": [],
+            "communities": [],
+            "users": []
+        })
+        .to_string();
+        let (api, request) = serve("200 OK", &body).await;
+        let mut feed = Feed::default();
+        let _ = feed.connect(api);
+        feed.set_search_communities(&[], Some(&post.community));
+        let _ = feed.update(Message::Search("matching".into(), Some(post.community.id)));
+        let (task, _) = feed.update(Message::SearchKind(SearchKind::Comments.index()));
+        let response = loaded(task).await;
+        let _ = feed.update(response.clone());
+        assert_eq!(feed.comments, vec![comment]);
+
+        let request = request.await.unwrap();
+        let line = request.lines().next().unwrap();
+        assert!(line.starts_with("GET /api/v3/search?"));
+        for param in ["q=matching", "type_=Comments", "community_id=2", "page=1"] {
+            assert!(line.contains(param), "{line}");
+        }
+
+        let _ = feed.update(Message::SearchCommunity(0));
+        let _ = feed.update(response);
+        assert!(feed.search_community.is_none());
+        assert!(feed.comments.is_empty());
+        assert!(feed.busy);
     }
 }

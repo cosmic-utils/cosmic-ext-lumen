@@ -71,7 +71,7 @@ impl App {
         if !matches!(message, feed::Message::Scope(feed::Scope::Community(_))) {
             self.community_scope = None;
         }
-        if !matches!(message, feed::Message::Search(_)) {
+        if !matches!(message, feed::Message::Search(..)) {
             self.search.clear();
         }
         self.leave_discussion();
@@ -96,6 +96,7 @@ impl App {
                     .filter(|item| item.id == id)
             })
             .or_else(|| self.community_scope.as_ref().filter(|item| item.id == id))
+            .or_else(|| self.feed.found_community(id))
             .cloned();
         let Some(community) = community else {
             return Task::none();
@@ -107,7 +108,11 @@ impl App {
     pub(super) fn update_feed(&mut self, message: feed::Message) -> Task<Message> {
         let reset_scroll = matches!(
             message,
-            feed::Message::Sort(_) | feed::Message::Refresh | feed::Message::SavedTab(_)
+            feed::Message::Sort(_)
+                | feed::Message::Refresh
+                | feed::Message::SavedTab(_)
+                | feed::Message::SearchKind(_)
+                | feed::Message::SearchCommunity(_)
         );
         if reset_scroll {
             self.feed_offset = 0.0;

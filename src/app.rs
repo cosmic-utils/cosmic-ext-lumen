@@ -247,6 +247,7 @@ impl cosmic::Application for App {
                 self.feed_offset = offset;
                 Task::none()
             }
+            Message::Feed(feed::Message::OpenCommunity(id)) => self.open_community(id),
             Message::Feed(feed::Message::CommunityDetails(id)) => self.open_community_details(id),
             Message::Feed(message) => self.update_feed(message),
             Message::Inbox(message) => self.update_inbox(message),
@@ -293,7 +294,18 @@ impl cosmic::Application for App {
                 Task::none()
             }
             Message::Search if !self.search.trim().is_empty() && self.feed.api().is_some() => {
-                self.navigate_feed(feed::Message::Search(self.search.trim().to_owned()))
+                if self.feed.scope() != feed::Scope::Search {
+                    self.feed.set_search_communities(
+                        self.accounts.follows(),
+                        self.community_scope
+                            .as_ref()
+                            .or_else(|| self.post.selected.as_ref().map(|post| &post.community)),
+                    );
+                }
+                self.navigate_feed(feed::Message::Search(
+                    self.search.trim().to_owned(),
+                    self.community_scope.as_ref().map(|community| community.id),
+                ))
             }
             Message::FocusSearch if self.feed.api().is_some() && !self.publish.visible => {
                 operation::focus(SEARCH_ID)

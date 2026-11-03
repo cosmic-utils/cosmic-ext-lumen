@@ -1,4 +1,4 @@
-use super::{Feed, Message, Scope, Sort};
+use super::{Feed, Message, Scope, SearchKind, Sort};
 use crate::shared::presentation::{age, community_handle, selectable_card};
 use cosmic::{
     Element,
@@ -25,7 +25,9 @@ impl Feed {
                     .width(Length::Fill)
                     .wrapping(Wrapping::WordOrGlyph),
             );
-        let comments = self.viewing_saved_comments();
+        let comments = self.viewing_comments();
+        let searching = self.scope == Scope::Search;
+        let communities = searching && self.search_type == SearchKind::Communities;
         if self.scope == Scope::Saved {
             controls = controls.push(widget::dropdown(
                 &["Posts", "Comments"][..],
@@ -33,7 +35,7 @@ impl Feed {
                 Message::SavedTab,
             ));
         }
-        if !comments {
+        if !self.viewing_saved_comments() && !communities {
             controls = controls.push(widget::dropdown(
                 Sort::LABELS.as_slice(),
                 Some(self.sort.index()),
@@ -57,7 +59,8 @@ impl Feed {
         if let Some(error) = &self.open_error {
             content = content.push(widget::text::body(error));
         }
-        let empty = self.posts.is_empty() && self.saved_comments.is_empty();
+        let empty =
+            self.posts.is_empty() && self.comments.is_empty() && self.communities.is_empty();
         if let Some(error) = &self.error {
             content = content.push(widget::text::body(error));
             if empty && !self.has_more() {
@@ -68,6 +71,8 @@ impl Feed {
             let message = if self.busy {
                 if comments {
                     "Loading comments…"
+                } else if communities {
+                    "Loading communities…"
                 } else {
                     "Loading posts…"
                 }
@@ -75,6 +80,8 @@ impl Feed {
                 match self.scope {
                     Scope::Saved if comments => "No saved comments.",
                     Scope::Saved => "No saved posts.",
+                    Scope::Search if comments => "No matching comments.",
+                    Scope::Search if communities => "No matching communities.",
                     Scope::Search => "No matching posts.",
                     _ => "No posts in this feed.",
                 }
@@ -119,7 +126,7 @@ impl Feed {
                 Some(Message::Open(post.post.id.0)),
             ));
         }
-        for comment in &self.saved_comments {
+        for comment in &self.comments {
             let label = if comment.comment.deleted {
                 "[deleted]"
             } else if comment.comment.removed {
@@ -153,21 +160,74 @@ impl Feed {
                     .then_some(Message::OpenComment(comment.comment.id)),
             ));
         }
+        for result in &self.communities {
+            let community = &result.community;
+            let card = widget::column::with_capacity(2)
+                .spacing(space.space_xxxs)
+                .push(widget::text::body(&community.title).font(cosmic::font::semibold()))
+                .push(widget::text::caption(format!(
+                    "!{}",
+                    community_handle(community)
+                )))
+                .width(Length::Fill);
+            content = content.push(selectable_card(
+                card,
+                if compact {
+                    space.space_xxs
+                } else {
+                    space.space_xs
+                },
+                false,
+                Some(Message::OpenCommunity(community.id)),
+            ));
+        }
         if self.has_more() {
             content = content.push(
                 button::standard(if self.busy {
                     "Loading…"
                 } else if comments {
                     "Load more comments"
+                } else if communities {
+                    "Load more communities"
                 } else {
                     "Load more posts"
                 })
                 .on_press_maybe((!self.busy).then_some(Message::More)),
             );
         }
-        widget::column::with_capacity(2)
+        let mut layout = widget::column::with_capacity(3)
             .spacing(space.space_xs)
-            .push(controls)
+            .push(controls);
+        if searching {
+            let mut filters =
+                widget::row::with_capacity(2)
+                    .spacing(space.space_xxs)
+                    .push(widget::dropdown(
+                        &["Posts", "Comments", "Communities"][..],
+                        Some(self.search_type.index()),
+                        Message::SearchKind,
+                    ));
+            if !communities && !self.search_communities.is_empty() {
+                let mut labels = vec!["All communities".to_owned()];
+                labels.extend(
+                    self.search_communities
+                        .iter()
+                        .map(|community| format!("!{}", community_handle(community))),
+                );
+                let selected = self
+                    .search_communities
+                    .iter()
+                    .position(|community| Some(community.id) == self.search_community)
+                    .map_or(0, |index| index + 1);
+                filters = filters.push(widget::dropdown(
+                    labels,
+                    Some(selected),
+                    Message::SearchCommunity,
+                ));
+            }
+            layout = layout.push(filters.wrap());
+        }
+        layout
             .push(
                 widget::scrollable(widget::container(content).padding([0, space.space_s, 0, 0]))
                     .id(SCROLL_ID)
