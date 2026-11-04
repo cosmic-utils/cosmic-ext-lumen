@@ -247,6 +247,14 @@ impl cosmic::Application for App {
                 self.feed_offset = offset;
                 Task::none()
             }
+            Message::Feed(feed::Message::ReferenceResolved(generation, result)) => {
+                if self.destination == Destination::Feed
+                    && let Some(message) = self.feed.finish_resolution(generation, result)
+                {
+                    return self.update(Message::Feed(message));
+                }
+                Task::none()
+            }
             Message::Feed(feed::Message::OpenPerson(id)) => {
                 self.navigate_feed(feed::Message::Scope(feed::Scope::Profile(id)))
             }

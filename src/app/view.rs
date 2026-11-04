@@ -18,7 +18,7 @@ impl App {
             return Vec::new();
         }
         let width = (self.width - 200.0).clamp(110.0, 330.0);
-        let search = widget::search_input("Search posts", &self.search)
+        let search = widget::search_input("Search or paste a link", &self.search)
             .id(SEARCH_ID.into())
             .width(Length::Fixed(width))
             .on_input(Message::SearchInput)

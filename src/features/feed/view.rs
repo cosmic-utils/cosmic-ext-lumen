@@ -29,7 +29,8 @@ impl Feed {
                     .wrapping(Wrapping::WordOrGlyph),
             );
         let comments = self.viewing_comments();
-        let searching = self.scope == Scope::Search;
+        let reference = self.viewing_reference();
+        let searching = self.scope == Scope::Search && !reference;
         let communities = searching && self.search_type == SearchKind::Communities;
         let people = searching && self.search_type == SearchKind::People;
         let profile = matches!(self.scope, Scope::Profile(_));
@@ -47,7 +48,7 @@ impl Feed {
                 Message::ProfileTab,
             ));
         }
-        if !self.viewing_saved_comments() && !communities && !people {
+        if !self.viewing_saved_comments() && !communities && !people && !reference {
             controls = controls.push(widget::dropdown(
                 Sort::LABELS.as_slice(),
                 Some(self.sort.index()),
@@ -95,11 +96,17 @@ impl Feed {
             content = content.push(widget::text::body(error));
             if empty && !self.has_more() {
                 content = content.push(button::standard("Retry").on_press(Message::Refresh));
+                if reference {
+                    content = content
+                        .push(button::text("Search as keywords").on_press(Message::SearchKeywords));
+                }
             }
         }
         if empty && self.error.is_none() {
             let message = if self.busy {
-                if comments {
+                if reference {
+                    "Opening link or handle…"
+                } else if comments {
                     "Loading comments…"
                 } else if communities {
                     "Loading communities…"

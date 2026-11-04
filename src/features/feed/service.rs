@@ -6,7 +6,7 @@ use lemmy_api_common::{
     lemmy_db_views::structs::{CommentView, PaginationCursor},
     person::{GetPersonDetails, GetPersonDetailsResponse},
     post::{GetPosts, GetPostsResponse},
-    site::{Search, SearchResponse},
+    site::{ResolveObject, ResolveObjectResponse, Search, SearchResponse},
 };
 
 pub const PAGE_SIZE: i64 = 20;
@@ -46,6 +46,35 @@ pub async fn load(
 
 pub async fn search(api: Api, query: Search) -> Result<SearchResponse, String> {
     api.get("search", &query).await
+}
+
+pub async fn resolve(api: Api, query: String) -> Result<ResolveObjectResponse, String> {
+    api.get("resolve_object", &ResolveObject { q: query }).await
+}
+
+pub fn is_federated_reference(query: &str) -> bool {
+    if query.chars().any(char::is_whitespace) {
+        return false;
+    }
+    if let Ok(url) = url::Url::parse(query)
+        && matches!(url.scheme(), "http" | "https")
+        && url.has_host()
+    {
+        return true;
+    }
+    let Some((name, host)) = query
+        .strip_prefix(['!', '@'])
+        .and_then(|handle| handle.split_once('@'))
+    else {
+        return false;
+    };
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        && !host.is_empty()
+        && !host.contains(['/', '@', '?', '#', '%', '\\'])
+        && url::Url::parse(&format!("https://{host}")).is_ok()
 }
 
 pub async fn saved_comments(api: Api, page: i64) -> Result<Vec<CommentView>, String> {

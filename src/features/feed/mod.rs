@@ -3,6 +3,8 @@ mod service;
 mod view;
 pub use view::SCROLL_ID;
 
+use std::sync::Arc;
+
 use crate::{features::post, shared::api::Api};
 use cosmic::{iced::Task, widget::markdown};
 use lemmy_api_common::{
@@ -15,7 +17,7 @@ use lemmy_api_common::{
     lemmy_db_views_actor::structs::{CommunityView, PersonView},
     person::GetPersonDetailsResponse,
     post::GetPostsResponse,
-    site::{Search, SearchResponse},
+    site::{ResolveObjectResponse, Search, SearchResponse},
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -78,6 +80,7 @@ pub struct Feed {
     generation: u64,
     api: Option<Api>,
     query: String,
+    resolve_reference: bool,
     search_type: SearchKind,
     search_community: Option<CommunityId>,
     search_communities: Vec<Community>,
@@ -123,6 +126,8 @@ pub enum Message {
     Scope(Scope),
     Search(String, Option<CommunityId>),
     SearchKind(usize),
+    SearchKeywords,
+    ReferenceResolved(u64, Result<Arc<ResolveObjectResponse>, String>),
     SearchCommunity(usize),
     OpenCommunity(CommunityId),
     CommunityDetails(CommunityId),
@@ -200,6 +205,11 @@ impl Feed {
                 move |result| Message::ProfileLoaded(generation, append, result.map(Box::new)),
             );
         }
+        if self.viewing_reference() {
+            return Task::perform(service::resolve(api, self.query.clone()), move |result| {
+                Message::ReferenceResolved(generation, result.map(Arc::new))
+            });
+        }
         if self.scope == Scope::Search {
             return Task::perform(
                 service::search(
@@ -260,8 +270,13 @@ impl Feed {
                     self.search_community = community;
                 }
                 self.profile = None;
+                self.resolve_reference = service::is_federated_reference(&query);
                 self.query = query;
                 self.scope = Scope::Search;
+                return (self.reload(), None);
+            }
+            Message::SearchKeywords if self.viewing_reference() => {
+                self.resolve_reference = false;
                 return (self.reload(), None);
             }
             Message::SearchKind(index) if self.scope == Scope::Search => {
@@ -461,6 +476,48 @@ impl Feed {
         (Task::none(), None)
     }
 
+    fn viewing_reference(&self) -> bool {
+        self.scope == Scope::Search && self.resolve_reference
+    }
+
+    pub fn finish_resolution(
+        &mut self,
+        generation: u64,
+        result: Result<Arc<ResolveObjectResponse>, String>,
+    ) -> Option<Message> {
+        if generation != self.generation || !self.viewing_reference() {
+            return None;
+        }
+        self.busy = false;
+        let response = match result {
+            Ok(response) => response,
+            Err(error) => {
+                self.error = Some(format!("Could not open this link or handle. {error}"));
+                return None;
+            }
+        };
+        let message = if let Some(comment) = &response.comment {
+            let id = comment.comment.id;
+            self.comments.push(comment.clone());
+            Message::OpenComment(id)
+        } else if let Some(post) = &response.post {
+            let id = post.post.id.0;
+            self.posts.push(post.clone());
+            Message::Open(id)
+        } else if let Some(community) = &response.community {
+            let id = community.community.id;
+            self.communities.push(community.clone());
+            Message::OpenCommunity(id)
+        } else if let Some(person) = &response.person {
+            Message::OpenPerson(person.person.id)
+        } else {
+            self.error = Some("The instance found no match for this link or handle.".into());
+            return None;
+        };
+        self.loaded = true;
+        Some(message)
+    }
+
     pub fn set_search_communities(
         &mut self,
         communities: &[Community],
@@ -491,6 +548,9 @@ impl Feed {
     }
 
     fn viewing_comments(&self) -> bool {
+        if self.viewing_reference() {
+            return !self.comments.is_empty();
+        }
         self.viewing_saved_comments()
             || (self.scope == Scope::Search && self.search_type == SearchKind::Comments)
             || (matches!(self.scope, Scope::Profile(_)) && self.profile_comments)
@@ -806,6 +866,53 @@ mod tests {
             assert!(line.starts_with("GET /api/v3/user?"));
             assert!(line.contains("person_id=1"));
             assert!(line.contains("page=1"));
+        }
+    }
+    #[tokio::test]
+    async fn federated_reference_opens_the_resolved_item_for_the_active_instance() {
+        let post = post_view();
+        let url = "https://remote.example/post/200";
+        let body = json!({"post": post}).to_string();
+        let (api, request) = serve("200 OK", &body).await;
+        let mut feed = Feed::default();
+        let _ = feed.connect(api.authenticated("reader".into()));
+        let (task, _) = feed.update(Message::Search(url.into(), None));
+        let Message::ReferenceResolved(generation, result) = loaded(task).await else {
+            panic!("expected a reference lookup");
+        };
+        let open = feed.finish_resolution(generation, result.clone()).unwrap();
+        assert_eq!(feed.update(open).1, Some((post, None)));
+
+        let request = request.await.unwrap();
+        let line = request.lines().next().unwrap();
+        assert!(line.starts_with(
+            "GET /api/v3/resolve_object?q=https%3A%2F%2Fremote.example%2Fpost%2F200 "
+        ));
+        assert!(request.contains("authorization: Bearer reader\r\n"));
+
+        let _ = feed.update(Message::Search("other keywords".into(), None));
+        assert!(feed.finish_resolution(generation, result).is_none());
+        assert!(feed.posts.is_empty());
+    }
+
+    #[test]
+    fn distinguishes_federated_references_from_keywords() {
+        for query in [
+            "https://remote.example/comment/12",
+            "!community@remote.example",
+            "@person@remote.example",
+        ] {
+            assert!(service::is_federated_reference(query), "{query}");
+        }
+        for query in [
+            "hello world",
+            "!community",
+            "person@example.org",
+            "@person@",
+            "discussion about https://remote.example/post/1",
+            "file:///tmp/post",
+        ] {
+            assert!(!service::is_federated_reference(query), "{query}");
         }
     }
 }
