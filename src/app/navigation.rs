@@ -111,6 +111,7 @@ impl App {
             feed::Message::Sort(_)
                 | feed::Message::Refresh
                 | feed::Message::SavedTab(_)
+                | feed::Message::ProfileTab(_)
                 | feed::Message::SearchKind(_)
                 | feed::Message::SearchCommunity(_)
         );
@@ -196,6 +197,9 @@ impl App {
                 }
             }
             post::Message::OpenCommunity(id) => self.open_community(id),
+            post::Message::OpenPerson(id) => {
+                self.navigate_feed(feed::Message::Scope(feed::Scope::Profile(id)))
+            }
             post::Message::CommunityDetails => {
                 if let Some(id) = self.post.selected.as_ref().map(|post| post.community.id) {
                     return self.open_community_details(id);

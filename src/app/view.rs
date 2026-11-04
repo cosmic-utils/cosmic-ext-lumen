@@ -177,6 +177,15 @@ impl App {
             feed::Scope::Subscribed => "Subscribed".into(),
             feed::Scope::Saved => "Saved".into(),
             feed::Scope::Search => "Search results".into(),
+            feed::Scope::Profile(_) => self.feed.profile().map_or_else(
+                || "Profile".into(),
+                |person| {
+                    person
+                        .display_name
+                        .clone()
+                        .unwrap_or_else(|| person.name.clone())
+                },
+            ),
             feed::Scope::Community(_) => self
                 .community_scope
                 .as_ref()

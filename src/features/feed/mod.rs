@@ -4,15 +4,16 @@ mod view;
 pub use view::SCROLL_ID;
 
 use crate::{features::post, shared::api::Api};
-use cosmic::iced::Task;
+use cosmic::{iced::Task, widget::markdown};
 use lemmy_api_common::{
     lemmy_db_schema::{
         ListingType, SearchType, SortType,
-        newtypes::{CommentId, CommunityId, PostId},
-        source::community::Community,
+        newtypes::{CommentId, CommunityId, PersonId, PostId},
+        source::{community::Community, person::Person},
     },
     lemmy_db_views::structs::{CommentView, PaginationCursor, PostView},
-    lemmy_db_views_actor::structs::CommunityView,
+    lemmy_db_views_actor::structs::{CommunityView, PersonView},
+    person::GetPersonDetailsResponse,
     post::GetPostsResponse,
     site::{Search, SearchResponse},
 };
@@ -61,6 +62,7 @@ pub enum Scope {
     Subscribed,
     Saved,
     Community(CommunityId),
+    Profile(PersonId),
     Search,
 }
 
@@ -80,6 +82,10 @@ pub struct Feed {
     search_community: Option<CommunityId>,
     search_communities: Vec<Community>,
     communities: Vec<CommunityView>,
+    people: Vec<PersonView>,
+    profile: Option<Person>,
+    profile_bio: markdown::Content,
+    profile_comments: bool,
     page: i64,
     page_more: bool,
     show_saved_comments: bool,
@@ -94,13 +100,18 @@ enum SearchKind {
     Posts,
     Comments,
     Communities,
+    People,
 }
 
 impl SearchKind {
-    const OPTIONS: [Self; 3] = [Self::Posts, Self::Comments, Self::Communities];
+    const OPTIONS: [Self; 4] = [Self::Posts, Self::Comments, Self::Communities, Self::People];
 
     fn index(self) -> usize {
         self as usize
+    }
+
+    fn supports_community(self) -> bool {
+        matches!(self, Self::Posts | Self::Comments)
     }
 }
 
@@ -116,6 +127,10 @@ pub enum Message {
     OpenCommunity(CommunityId),
     CommunityDetails(CommunityId),
     SavedTab(usize),
+    ProfileTab(usize),
+    OpenPerson(PersonId),
+    OpenLink(String),
+    ProfileLoaded(u64, bool, Result<Box<GetPersonDetailsResponse>, String>),
     Open(i32),
     OpenComment(CommentId),
     CommentOpened(u64, CommentId, Result<Box<PostView>, String>),
@@ -127,13 +142,17 @@ pub enum Message {
 
 impl Feed {
     pub fn connect(&mut self, api: Api) -> Task<Message> {
-        if matches!(self.scope, Scope::Community(_) | Scope::Search)
-            || (matches!(self.scope, Scope::Saved | Scope::Subscribed) && !api.is_authenticated())
+        if matches!(
+            self.scope,
+            Scope::Community(_) | Scope::Search | Scope::Profile(_)
+        ) || (matches!(self.scope, Scope::Saved | Scope::Subscribed) && !api.is_authenticated())
         {
             self.scope = Scope::All;
         }
         self.api = Some(api);
         self.show_saved_comments = false;
+        self.profile = None;
+        self.profile_comments = false;
         self.search_type = SearchKind::Posts;
         self.search_community = None;
         self.search_communities.clear();
@@ -153,6 +172,7 @@ impl Feed {
         self.posts.clear();
         self.comments.clear();
         self.communities.clear();
+        self.people.clear();
         self.opening_comment = None;
         self.open_error = None;
         self.cursor = None;
@@ -174,6 +194,12 @@ impl Feed {
                 Message::SavedCommentsLoaded(generation, result)
             });
         }
+        if let Scope::Profile(id) = self.scope {
+            return Task::perform(
+                service::profile(api, id, self.sort, self.page),
+                move |result| Message::ProfileLoaded(generation, append, result.map(Box::new)),
+            );
+        }
         if self.scope == Scope::Search {
             return Task::perform(
                 service::search(
@@ -184,10 +210,11 @@ impl Feed {
                             SearchKind::Posts => SearchType::Posts,
                             SearchKind::Comments => SearchType::Comments,
                             SearchKind::Communities => SearchType::Communities,
+                            SearchKind::People => SearchType::Users,
                         }),
                         community_id: self
                             .search_community
-                            .filter(|_| self.search_type != SearchKind::Communities),
+                            .filter(|_| self.search_type.supports_community()),
                         listing_type: Some(ListingType::All),
                         sort: Some(self.sort.api()),
                         page: Some(self.page),
@@ -223,6 +250,8 @@ impl Feed {
                     && (!matches!(scope, Scope::Saved | Scope::Subscribed) || self.signed_in()) =>
             {
                 self.scope = scope;
+                self.profile = None;
+                self.profile_comments = false;
                 return (self.reload(), None);
             }
             Message::Search(query, community) if !query.is_empty() && self.api.is_some() => {
@@ -230,6 +259,7 @@ impl Feed {
                     self.search_type = SearchKind::Posts;
                     self.search_community = community;
                 }
+                self.profile = None;
                 self.query = query;
                 self.scope = Scope::Search;
                 return (self.reload(), None);
@@ -252,6 +282,52 @@ impl Feed {
                 if community != self.search_community {
                     self.search_community = community;
                     return (self.reload(), None);
+                }
+            }
+            Message::ProfileTab(index) if matches!(self.scope, Scope::Profile(_)) && index < 2 => {
+                let comments = index == 1;
+                if self.profile_comments != comments {
+                    self.profile_comments = comments;
+                    return (self.reload(), None);
+                }
+            }
+            Message::ProfileLoaded(generation, append, result) if generation == self.generation => {
+                self.busy = false;
+                match result {
+                    Ok(response) => {
+                        let GetPersonDetailsResponse {
+                            person_view,
+                            posts,
+                            comments,
+                            ..
+                        } = *response;
+                        self.profile_bio = markdown::Content::parse(
+                            person_view.person.bio.as_deref().unwrap_or_default(),
+                        );
+                        self.profile = Some(person_view.person);
+                        let count = if self.profile_comments {
+                            let count = comments.len();
+                            self.apply_comments(
+                                comments
+                                    .into_iter()
+                                    .filter(|item| !item.post.nsfw && !item.community.nsfw),
+                            );
+                            count
+                        } else {
+                            let count = posts.len();
+                            self.apply_posts(
+                                posts
+                                    .into_iter()
+                                    .filter(|item| !item.post.nsfw && !item.community.nsfw),
+                                append,
+                            );
+                            count
+                        };
+                        self.loaded = true;
+                        self.page_more = count == service::PAGE_SIZE as usize;
+                        self.page += 1;
+                    }
+                    Err(error) => self.error = Some(error),
                 }
             }
             Message::SavedTab(index) if self.scope == Scope::Saved && index < 2 => {
@@ -345,6 +421,20 @@ impl Feed {
                                 ));
                                 count
                             }
+                            SearchKind::People => {
+                                let count = response.users.len();
+                                for view in response.users {
+                                    if !view.person.deleted
+                                        && !self
+                                            .people
+                                            .iter()
+                                            .any(|item| item.person.id == view.person.id)
+                                    {
+                                        self.people.push(view);
+                                    }
+                                }
+                                count
+                            }
                             SearchKind::Communities => {
                                 let count = response.communities.len();
                                 for view in response.communities {
@@ -396,9 +486,14 @@ impl Feed {
             .find(|community| community.id == id)
     }
 
+    pub fn profile(&self) -> Option<&Person> {
+        self.profile.as_ref()
+    }
+
     fn viewing_comments(&self) -> bool {
         self.viewing_saved_comments()
             || (self.scope == Scope::Search && self.search_type == SearchKind::Comments)
+            || (matches!(self.scope, Scope::Profile(_)) && self.profile_comments)
     }
 
     fn apply_comments(&mut self, comments: impl IntoIterator<Item = CommentView>) {
@@ -645,5 +740,72 @@ mod tests {
         assert!(feed.search_community.is_none());
         assert!(feed.comments.is_empty());
         assert!(feed.busy);
+    }
+    #[tokio::test]
+    async fn people_search_opens_profile_post_and_comment_history() {
+        let post = post_view();
+        let comment = comment_view(&post, "Author's comment");
+        let person = json!({
+            "person": post.creator,
+            "counts": {
+                "person_id": post.creator.id,
+                "post_count": 1,
+                "comment_count": 1
+            },
+            "is_admin": false
+        });
+        let search = json!({
+            "type_": "Users",
+            "posts": [],
+            "comments": [],
+            "communities": [],
+            "users": [person]
+        })
+        .to_string();
+        let (api, search_request) = serve("200 OK", &search).await;
+        let mut feed = Feed::default();
+        let _ = feed.connect(api);
+        let _ = feed.update(Message::Search("author".into(), Some(post.community.id)));
+        let (task, _) = feed.update(Message::SearchKind(SearchKind::People.index()));
+        let _ = feed.update(loaded(task).await);
+        assert_eq!(feed.people[0].person.id, post.creator.id);
+        let request = search_request.await.unwrap();
+        let line = request.lines().next().unwrap();
+        assert!(line.contains("type_=Users"));
+        assert!(!line.contains("community_id"));
+
+        let profile = json!({
+            "person_view": person,
+            "posts": [post],
+            "comments": [comment],
+            "moderates": []
+        })
+        .to_string();
+        let (api, profile_request) = serve("200 OK", &profile).await;
+        feed.api = Some(api);
+        let (task, _) = feed.update(Message::Scope(Scope::Profile(post.creator.id)));
+        let posts = loaded(task).await;
+        let _ = feed.update(posts.clone());
+        assert_eq!(feed.profile().unwrap().id, post.creator.id);
+        assert_eq!(feed.posts, vec![post.clone()]);
+        assert!(feed.comments.is_empty());
+
+        let (api, comments_request) = serve("200 OK", &profile).await;
+        feed.api = Some(api);
+        let (task, _) = feed.update(Message::ProfileTab(1));
+        let _ = feed.update(posts);
+        assert!(feed.posts.is_empty());
+        assert!(feed.busy);
+        let _ = feed.update(loaded(task).await);
+        assert_eq!(feed.comments, vec![comment]);
+        assert!(feed.viewing_comments());
+
+        for request in [profile_request, comments_request] {
+            let request = request.await.unwrap();
+            let line = request.lines().next().unwrap();
+            assert!(line.starts_with("GET /api/v3/user?"));
+            assert!(line.contains("person_id=1"));
+            assert!(line.contains("page=1"));
+        }
     }
 }

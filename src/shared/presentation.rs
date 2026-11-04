@@ -5,7 +5,7 @@ use cosmic::{
     theme::Container,
     widget::{self, button, text_editor},
 };
-use lemmy_api_common::lemmy_db_schema::source::community::Community;
+use lemmy_api_common::lemmy_db_schema::source::{community::Community, person::Person};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn age(timestamp: i64) -> String {
@@ -24,6 +24,11 @@ pub fn age(timestamp: i64) -> String {
 pub fn community_handle(community: &Community) -> String {
     let host = community.actor_id.host_str().unwrap_or_default();
     format!("{}@{host}", community.name)
+}
+
+pub fn person_handle(person: &Person) -> String {
+    let host = person.actor_id.host_str().unwrap_or_default();
+    format!("@{}@{host}", person.name)
 }
 
 /// A multi-line editor styled to match a COSMIC text input.

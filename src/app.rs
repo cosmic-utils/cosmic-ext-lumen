@@ -247,6 +247,10 @@ impl cosmic::Application for App {
                 self.feed_offset = offset;
                 Task::none()
             }
+            Message::Feed(feed::Message::OpenPerson(id)) => {
+                self.navigate_feed(feed::Message::Scope(feed::Scope::Profile(id)))
+            }
+            Message::Feed(feed::Message::OpenLink(url)) => self.update(Message::OpenLink(url)),
             Message::Feed(feed::Message::OpenCommunity(id)) => self.open_community(id),
             Message::Feed(feed::Message::CommunityDetails(id)) => self.open_community_details(id),
             Message::Feed(message) => self.update_feed(message),

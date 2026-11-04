@@ -116,6 +116,7 @@ pub enum Message {
     Back,
     ToggleFocus,
     OpenCommunity(CommunityId),
+    OpenPerson(PersonId),
     CommunityDetails,
     Retry,
     More,

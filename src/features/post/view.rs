@@ -165,11 +165,14 @@ impl Post {
                     .padding([0, space.space_xxxs])
                     .on_press(Message::OpenCommunity(post.community.id)),
             )
-            .push(widget::text::caption(format!(
-                "{} · {}",
-                post.creator.name,
-                age(post.post.published.timestamp())
-            )))
+            .push(
+                button::text(&post.creator.name)
+                    .padding([0, space.space_xxxs])
+                    .on_press_maybe(
+                        (!post.creator.deleted).then_some(Message::OpenPerson(post.creator.id)),
+                    ),
+            )
+            .push(widget::text::caption(age(post.post.published.timestamp())))
             .wrap();
         let mut content = widget::column::with_capacity(self.comments.len() + 10)
             .spacing(space.space_xs)
@@ -354,7 +357,14 @@ impl Post {
             .align_y(Alignment::Center)
             .spacing(space.space_xxs)
             .push(icon::from_name("avatar-default-symbolic").size(16).icon())
-            .push(widget::text::caption(&comment.data.creator.name).font(cosmic::font::semibold()))
+            .push(
+                button::text(&comment.data.creator.name)
+                    .padding([0, space.space_xxxs])
+                    .on_press_maybe(
+                        (!comment.data.creator.deleted)
+                            .then_some(Message::OpenPerson(comment.data.creator.id)),
+                    ),
+            )
             .push(widget::text::caption(age(comment
                 .data
                 .comment

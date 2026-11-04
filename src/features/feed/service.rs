@@ -2,8 +2,9 @@ use super::{Scope, Sort};
 use crate::shared::api::Api;
 use lemmy_api_common::{
     comment::{GetComments, GetCommentsResponse},
-    lemmy_db_schema::{CommentSortType, ListingType},
+    lemmy_db_schema::{CommentSortType, ListingType, newtypes::PersonId},
     lemmy_db_views::structs::{CommentView, PaginationCursor},
+    person::{GetPersonDetails, GetPersonDetailsResponse},
     post::{GetPosts, GetPostsResponse},
     site::{Search, SearchResponse},
 };
@@ -20,7 +21,11 @@ pub async fn load(
         "post/list",
         &GetPosts {
             type_: Some(match scope {
-                Scope::All | Scope::Saved | Scope::Community(_) | Scope::Search => ListingType::All,
+                Scope::All
+                | Scope::Saved
+                | Scope::Community(_)
+                | Scope::Search
+                | Scope::Profile(_) => ListingType::All,
                 Scope::Local => ListingType::Local,
                 Scope::Subscribed => ListingType::Subscribed,
             }),
@@ -58,4 +63,28 @@ pub async fn saved_comments(api: Api, page: i64) -> Result<Vec<CommentView>, Str
         )
         .await?;
     Ok(response.comments)
+}
+
+pub async fn profile(
+    api: Api,
+    id: PersonId,
+    sort: Sort,
+    page: i64,
+) -> Result<GetPersonDetailsResponse, String> {
+    let response: GetPersonDetailsResponse = api
+        .get(
+            "user",
+            &GetPersonDetails {
+                person_id: Some(id),
+                sort: Some(sort.api()),
+                page: Some(page),
+                limit: Some(PAGE_SIZE),
+                ..Default::default()
+            },
+        )
+        .await?;
+    if response.person_view.person.id != id {
+        return Err("The instance returned a different person.".into());
+    }
+    Ok(response)
 }
