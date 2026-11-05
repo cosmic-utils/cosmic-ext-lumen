@@ -124,7 +124,7 @@ impl App {
                     .map(Message::Feed),
                 Destination::Inbox => self
                     .inbox
-                    .view(self.post.focused_comment)
+                    .view(self.post.focused_comment, self.accounts.busy)
                     .map(Message::Inbox),
             };
             let width = if split {

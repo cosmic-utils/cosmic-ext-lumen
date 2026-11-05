@@ -1,11 +1,9 @@
 //! Account-scoped replies and mentions.
-use crate::shared::{
-    api::Api,
-    presentation::{age, selectable_card},
-};
+use crate::shared::{api::Api, presentation::age};
 use cosmic::{
     Element,
-    iced::{Alignment, Length, Task},
+    iced::{Alignment, Length, Task, core::text::Wrapping},
+    theme::Container,
     widget::{self, button, icon},
 };
 use lemmy_api_common::{
@@ -45,6 +43,8 @@ pub enum Message {
     Refresh,
     More,
     Open(NoticeId),
+    SetRead(NoticeId, bool),
+    ReadUpdated(u64, NoticeId, Result<bool, String>),
     Loaded(u64, bool, Result<Vec<Notice>, String>),
     Opened(
         u64,
@@ -65,6 +65,7 @@ pub struct Inbox {
     loaded: bool,
     busy: bool,
     opening: Option<NoticeId>,
+    updating_read: Option<NoticeId>,
     open_on_arrival: bool,
     unread_request: u64,
     error: Option<String>,
@@ -116,20 +117,40 @@ impl Inbox {
         })
     }
 
+    fn can_act(&self) -> bool {
+        !self.busy && self.opening.is_none() && self.updating_read.is_none()
+    }
+
+    fn apply_read(&mut self, id: NoticeId, read: bool) {
+        if let Some(notice) = self.notices.iter_mut().find(|notice| notice.id == id)
+            && notice.read != read
+        {
+            notice.read = read;
+            self.unread = if read {
+                self.unread.saturating_sub(1).max(0)
+            } else {
+                self.unread.saturating_add(1)
+            };
+        }
+    }
+
     pub fn update(&mut self, message: Message) -> (Task<Message>, Option<(PostView, CommentId)>) {
         match message {
-            Message::Refresh if !self.busy && self.opening.is_none() => {
+            Message::Refresh if self.can_act() => {
                 return (self.load(false), None);
             }
-            Message::More if self.more && !self.busy && self.opening.is_none() => {
+            Message::More if self.more && self.can_act() => {
                 return (self.load(true), None);
             }
-            Message::Open(id) if self.opening.is_none() && !self.busy => {
+            Message::Open(id) if self.can_act() => {
                 if let (Some(api), Some(notice)) = (
                     self.api.clone(),
                     self.notices.iter().find(|notice| notice.id == id).cloned(),
                 ) {
                     self.opening = Some(id);
+                    if !notice.read {
+                        self.unread_request += 1;
+                    }
                     self.open_on_arrival = true;
                     self.error = None;
                     let generation = self.generation;
@@ -140,6 +161,41 @@ impl Inbox {
                         None,
                     );
                 }
+            }
+            Message::SetRead(id, read) if self.can_act() => {
+                if let Some(api) = self.api.clone()
+                    && self
+                        .notices
+                        .iter()
+                        .any(|notice| notice.id == id && notice.read != read)
+                {
+                    self.updating_read = Some(id);
+                    self.unread_request += 1;
+                    self.error = None;
+                    let generation = self.generation;
+                    return (
+                        Task::perform(
+                            async move { set_read(&api, id, read).await },
+                            move |result| Message::ReadUpdated(generation, id, result),
+                        ),
+                        None,
+                    );
+                }
+            }
+            Message::ReadUpdated(generation, id, result)
+                if generation == self.generation && self.updating_read == Some(id) =>
+            {
+                self.updating_read = None;
+                match result {
+                    Ok(read) => {
+                        self.apply_read(id, read);
+                    }
+                    Err(error) => {
+                        self.error = Some(error);
+                        return (self.refresh_unread(), None);
+                    }
+                }
+                return (self.refresh_unread(), None);
             }
             Message::Loaded(generation, append, result) if generation == self.generation => {
                 self.busy = false;
@@ -171,26 +227,29 @@ impl Inbox {
                             return (self.refresh_unread(), None);
                         }
                     }
-                    Err(error) => self.error = Some(error),
+                    Err(error) => {
+                        self.error = Some(error);
+                        return (self.refresh_unread(), None);
+                    }
                 }
             }
-            Message::Opened(generation, id, result) if generation == self.generation => {
+            Message::Opened(generation, id, result)
+                if generation == self.generation && self.opening == Some(id) =>
+            {
                 self.opening = None;
                 let open = std::mem::take(&mut self.open_on_arrival);
                 match result {
                     Ok((post, comment, error)) => {
                         self.error = error;
-                        if self.error.is_none()
-                            && let Some(notice) =
-                                self.notices.iter_mut().find(|notice| notice.id == id)
-                            && !notice.read
-                        {
-                            notice.read = true;
-                            self.unread = self.unread.saturating_sub(1).max(0);
+                        if self.error.is_none() {
+                            self.apply_read(id, true);
                         }
                         return (self.refresh_unread(), open.then_some((*post, comment)));
                     }
-                    Err(error) => self.error = Some(error),
+                    Err(error) => {
+                        self.error = Some(error);
+                        return (self.refresh_unread(), None);
+                    }
                 }
             }
             Message::Unread(generation, request, Ok(count))
@@ -203,8 +262,10 @@ impl Inbox {
         (Task::none(), None)
     }
 
-    pub fn view(&self, selected: Option<CommentId>) -> Element<'_, Message> {
-        let space = cosmic::theme::active().cosmic().spacing;
+    pub fn view(&self, selected: Option<CommentId>, account_busy: bool) -> Element<'_, Message> {
+        let theme = cosmic::theme::active();
+        let space = theme.cosmic().spacing;
+        let radius = theme.cosmic().corner_radii.radius_s;
         let header = widget::row::with_capacity(3)
             .align_y(Alignment::Center)
             .push(widget::text::title3("Inbox"))
@@ -212,9 +273,7 @@ impl Inbox {
             .push(
                 button::icon(icon::from_name("view-refresh-symbolic"))
                     .tooltip("Refresh inbox")
-                    .on_press_maybe(
-                        (!self.busy && self.opening.is_none()).then_some(Message::Refresh),
-                    ),
+                    .on_press_maybe(self.can_act().then_some(Message::Refresh)),
             );
         let mut content =
             widget::column::with_capacity(self.notices.len() + 2).spacing(space.space_xxs);
@@ -230,33 +289,62 @@ impl Inbox {
             };
             content = content.push(widget::text::body(label));
         }
+        let can_open = self.can_act() && !account_busy;
         for notice in &self.notices {
             let action = match notice.id {
                 NoticeId::Reply(_) => "replied",
                 NoticeId::Mention(_) => "mentioned you",
             };
             let status = if notice.read { "" } else { " · Unread" };
-            let row = widget::column::with_capacity(2)
-                .spacing(space.space_xxxs)
-                .push(widget::text::caption(format!(
-                    "{} {action} · {}{status}",
-                    notice.author,
-                    age(notice.published)
-                )))
-                .push(widget::text::body(&notice.title).font(cosmic::font::semibold()))
-                .width(Length::Fill);
-            content = content.push(selectable_card(
-                row,
-                space.space_xs,
-                selected == Some(notice.comment),
-                (self.opening.is_none() && !self.busy).then_some(Message::Open(notice.id)),
-            ));
+            let title = button::custom(
+                widget::text::body(&notice.title)
+                    .font(cosmic::font::semibold())
+                    .wrapping(Wrapping::WordOrGlyph)
+                    .width(Length::Fill),
+            )
+            .class(button::ButtonClass::ListItem(radius))
+            .padding([space.space_xxs, space.space_xs])
+            .width(Length::Fill)
+            .selected(selected == Some(notice.comment))
+            .on_press_maybe(can_open.then_some(Message::Open(notice.id)));
+            let (symbol, label) = if notice.read {
+                ("image-red-eye-symbolic", "Mark as unread")
+            } else {
+                ("document-properties-symbolic", "Mark as read")
+            };
+            let read_control = button::icon(icon::from_name(symbol))
+                .tooltip(label)
+                .on_press_maybe(can_open.then_some(Message::SetRead(notice.id, !notice.read)));
+            let metadata = widget::row::with_capacity(2)
+                .spacing(space.space_xxs)
+                .align_y(Alignment::Center)
+                .push(
+                    widget::text::caption(format!(
+                        "{} {action} · {}{status}",
+                        notice.author,
+                        age(notice.published)
+                    ))
+                    .wrapping(Wrapping::WordOrGlyph)
+                    .width(Length::Fill),
+                )
+                .push(read_control);
+            let card = widget::column::with_capacity(2)
+                .push(title)
+                .push(widget::container(metadata).padding([0, space.space_xs]));
+            content = content.push(
+                widget::container(card)
+                    .class(Container::Card)
+                    .width(Length::Fill),
+            );
         }
         if self.opening.is_some() {
             content = content.push(widget::text::caption("Opening discussion…"));
         }
         if self.more && !self.busy {
-            content = content.push(button::standard("Load more").on_press(Message::More));
+            content = content.push(
+                button::standard("Load more")
+                    .on_press_maybe(self.can_act().then_some(Message::More)),
+            );
         }
         widget::column::with_capacity(2)
             .spacing(space.space_xs)
@@ -318,30 +406,130 @@ async fn open(
     notice: Notice,
 ) -> Result<(Box<PostView>, CommentId, Option<String>), String> {
     let post = super::post::get_post(&api, notice.post).await?;
-    let mut error = None;
-    if !notice.read {
-        error = match notice.id {
-            NoticeId::Reply(id) => api
-                .post::<_, CommentReplyResponse>(
+    let error = if notice.read {
+        None
+    } else {
+        set_read(&api, notice.id, true).await.err()
+    };
+    Ok((Box::new(post), notice.comment, error))
+}
+
+async fn set_read(api: &Api, id: NoticeId, read: bool) -> Result<bool, String> {
+    let (updated_id, updated_read) = match id {
+        NoticeId::Reply(comment_reply_id) => {
+            let response: CommentReplyResponse = api
+                .post(
                     "comment/mark_as_read",
                     &MarkCommentReplyAsRead {
-                        comment_reply_id: id,
-                        read: true,
+                        comment_reply_id,
+                        read,
                     },
                 )
-                .await
-                .err(),
-            NoticeId::Mention(id) => api
-                .post::<_, PersonMentionResponse>(
+                .await?;
+            let reply = response.comment_reply_view.comment_reply;
+            (NoticeId::Reply(reply.id), reply.read)
+        }
+        NoticeId::Mention(person_mention_id) => {
+            let response: PersonMentionResponse = api
+                .post(
                     "user/mention/mark_as_read",
                     &MarkPersonMentionAsRead {
-                        person_mention_id: id,
-                        read: true,
+                        person_mention_id,
+                        read,
                     },
                 )
-                .await
-                .err(),
-        };
+                .await?;
+            let mention = response.person_mention_view.person_mention;
+            (NoticeId::Mention(mention.id), mention.read)
+        }
+    };
+    if updated_id != id || updated_read != read {
+        return Err("The instance did not confirm the requested read status.".into());
     }
-    Ok((Box::new(post), notice.comment, error))
+    Ok(updated_read)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        features::post::tests::{comment_view, post_view},
+        shared::api::tests::serve,
+    };
+    use cosmic::iced::{futures::StreamExt, runtime};
+    use serde_json::{Value, json};
+
+    #[tokio::test]
+    async fn read_controls_use_the_active_account_and_wait_for_confirmation() {
+        let post = post_view();
+        let comment = comment_view(&post, "Inbox comment");
+        for (id, endpoint, view_key, notice_key, id_key, read) in [
+            (
+                NoticeId::Reply(CommentReplyId(9)),
+                "comment/mark_as_read",
+                "comment_reply_view",
+                "comment_reply",
+                "comment_reply_id",
+                true,
+            ),
+            (
+                NoticeId::Mention(PersonMentionId(9)),
+                "user/mention/mark_as_read",
+                "person_mention_view",
+                "person_mention",
+                "person_mention_id",
+                false,
+            ),
+        ] {
+            let mut view = serde_json::to_value(&comment).unwrap();
+            view["recipient"] = json!(post.creator);
+            view[notice_key] = json!({
+                "id": 9,
+                "recipient_id": post.creator.id,
+                "comment_id": comment.comment.id,
+                "read": read,
+                "published": comment.comment.published
+            });
+            let response = json!({(view_key): view}).to_string();
+            let (api, request) = serve("200 OK", &response).await;
+            let mut inbox = Inbox::default();
+            let _ = inbox.connect(&api.authenticated("reader".into()));
+            inbox.unread = i64::from(read);
+            inbox.notices.push(Notice {
+                id,
+                comment: comment.comment.id,
+                post: post.post.id,
+                title: post.post.name.clone(),
+                author: post.creator.name.clone(),
+                published: comment.comment.published.timestamp(),
+                read: !read,
+            });
+
+            let (task, opened) = inbox.update(Message::SetRead(id, read));
+            assert!(opened.is_none());
+            assert_eq!(inbox.notices[0].read, !read);
+            let mut stream = runtime::task::into_stream(task).unwrap();
+            let Some(runtime::Action::Output(message)) = stream.next().await else {
+                panic!("read status request did not finish");
+            };
+            let (_, opened) = inbox.update(message.clone());
+            assert!(opened.is_none());
+            assert_eq!(inbox.notices[0].read, read);
+            assert_eq!(inbox.unread, i64::from(!read));
+
+            let request = request.await.unwrap();
+            assert!(request.starts_with(&format!("POST /api/v3/{endpoint} HTTP/1.1")));
+            assert!(request.contains("authorization: Bearer reader\r\n"));
+            let (_, body) = request.split_once("\r\n\r\n").unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(body).unwrap(),
+                json!({(id_key): 9, "read": read})
+            );
+
+            let _ = inbox.connect(&Api::new(reqwest::Client::new(), "example.com").unwrap());
+            let _ = inbox.update(message);
+            assert!(inbox.notices.is_empty());
+            assert_eq!(inbox.unread, 0);
+        }
+    }
 }

@@ -138,6 +138,14 @@ impl App {
     }
 
     pub(super) fn update_inbox(&mut self, message: inbox::Message) -> Task<Message> {
+        if self.accounts.busy
+            && matches!(
+                message,
+                inbox::Message::Open(_) | inbox::Message::SetRead(..)
+            )
+        {
+            return Task::none();
+        }
         let unread = self.inbox.unread;
         let (task, selected) = self.inbox.update(message);
         if self.inbox.unread != unread {
