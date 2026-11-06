@@ -1,11 +1,12 @@
 use super::{Action, Comment, CommentTarget, Composer, Message, Post, thread};
 use crate::shared::{
     api::Api,
-    presentation::{age, community_handle, text_editor, toggle_button_class},
+    media::{self, Media, Size},
+    presentation::{age, community_label, selectable_card, text_editor, toggle_button_class},
 };
 use cosmic::{
     Element,
-    iced::{Alignment, Length, Padding},
+    iced::{Alignment, Length, Padding, core::text::Wrapping},
     theme::Container,
     widget::{self, button, icon, markdown},
 };
@@ -14,9 +15,13 @@ pub(crate) fn render_markdown<Message: Clone + 'static>(
     content: &markdown::Content,
     on_link: impl Fn(String) -> Message + 'static,
 ) -> Element<'_, Message> {
+    markdown::view(content.items(), markdown_settings()).map(on_link)
+}
+
+fn markdown_settings() -> markdown::Settings {
     let theme = cosmic::theme::active();
     let color = theme.cosmic().accent_color();
-    let settings = markdown::Settings::with_style(markdown::Style::from_palette(
+    markdown::Settings::with_style(markdown::Style::from_palette(
         cosmic::iced::theme::Palette {
             primary: cosmic::iced::Color::from_rgb(color.red, color.green, color.blue),
             ..if theme.theme_type.is_dark() {
@@ -26,8 +31,117 @@ pub(crate) fn render_markdown<Message: Clone + 'static>(
             }
             .palette()
         },
-    ));
-    markdown::view(content.items(), settings).map(on_link)
+    ))
+}
+
+struct DiscussionMarkdown<'a>(&'a Media);
+
+impl<'a> markdown::Viewer<'a, Message, cosmic::Theme, cosmic::Renderer> for DiscussionMarkdown<'a> {
+    fn on_link_click(url: markdown::Uri) -> Message {
+        Message::Link(url)
+    }
+
+    fn image(
+        &self,
+        settings: markdown::Settings,
+        url: &'a markdown::Uri,
+        title: &'a str,
+        alt: &markdown::Text,
+    ) -> Element<'a, Message> {
+        if !media::web_url(url) {
+            return cosmic::iced::widget::rich_text(alt.spans(settings.style)).into();
+        }
+        let label = if title.is_empty() {
+            "View image"
+        } else {
+            title
+        };
+        preview_image(self.0, url, label)
+    }
+}
+
+fn preview_image<'a>(media: &Media, url: &str, label: &'a str) -> Element<'a, Message> {
+    let open = Message::OpenImage(url.to_owned());
+    let height = Length::Fixed(320.0);
+    if let Some(picture) = media
+        .get(url, Size::Preview)
+        .or_else(|| media.get(url, Size::Thumbnail))
+    {
+        return button::custom(media::image_view(picture, Length::Fill, height))
+            .class(button::ButtonClass::Icon)
+            .padding(0)
+            .on_press(open)
+            .into();
+    }
+    widget::container(
+        button::standard(label)
+            .leading_icon(icon::from_name("image-x-generic-symbolic"))
+            .on_press(open),
+    )
+    .class(Container::Card)
+    .center_x(Length::Fill)
+    .center_y(height)
+    .into()
+}
+
+fn link_preview<'a>(
+    post: &'a lemmy_api_common::lemmy_db_schema::source::post::Post,
+    media: &Media,
+) -> Option<Element<'a, Message>> {
+    let url = post.url.as_ref()?;
+    let space = cosmic::theme::active().cosmic().spacing;
+    if let Some(image) = media::direct_image(post).filter(|url| media::web_url(url)) {
+        let mut content = widget::column::with_capacity(2)
+            .spacing(space.space_xxxs)
+            .push(preview_image(media, image, "View image"));
+        if let Some(alt) = post.alt_text.as_deref().filter(|alt| !alt.is_empty()) {
+            content = content.push(widget::text::caption(alt).wrapping(Wrapping::WordOrGlyph));
+        }
+        return Some(content.into());
+    }
+
+    let title = post
+        .embed_title
+        .as_deref()
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or(url.as_str());
+    let mut description = widget::column::with_capacity(3)
+        .spacing(space.space_xxxs)
+        .width(Length::Fill)
+        .push(widget::text::caption(url.host_str().unwrap_or_default()))
+        .push(
+            widget::text::body(title)
+                .font(cosmic::font::semibold())
+                .wrapping(Wrapping::WordOrGlyph),
+        );
+    if let Some(text) = post
+        .embed_description
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+    {
+        description = description.push(widget::text::body(text).wrapping(Wrapping::WordOrGlyph));
+    }
+    let mut row = widget::row::with_capacity(2)
+        .spacing(space.space_xs)
+        .align_y(Alignment::Center)
+        .push(description);
+    if let Some(picture) = media::thumbnail(post).and_then(|url| {
+        media
+            .get(url, Size::Preview)
+            .or_else(|| media.get(url, Size::Thumbnail))
+    }) {
+        row = row.push(media::image_view(
+            picture,
+            Length::Fixed(84.0),
+            Length::Fixed(72.0),
+        ));
+    }
+    Some(selectable_card(
+        row,
+        space.space_xs,
+        false,
+        Some(Message::Link(url.to_string())),
+    ))
 }
 
 impl Post {
@@ -91,14 +205,15 @@ impl Post {
         content.into()
     }
 
-    pub fn view(
-        &self,
+    pub fn view<'a>(
+        &'a self,
         account_busy: bool,
         show_back: bool,
         can_focus: bool,
         focused: bool,
         narrow: bool,
-    ) -> Element<'_, Message> {
+        media: &'a Media,
+    ) -> Element<'a, Message> {
         let space = cosmic::theme::active().cosmic().spacing;
         let Some(post) = &self.selected else {
             return widget::container(widget::text::body("Select a post to open its discussion."))
@@ -161,12 +276,14 @@ impl Post {
             .align_y(Alignment::Center)
             .spacing(space.space_xxxs)
             .push(
-                button::text(format!("!{}", community_handle(&post.community)))
+                button::text(community_label(&post.community))
+                    .leading_icon(media.community_avatar(&post.community))
                     .padding([0, space.space_xxxs])
                     .on_press(Message::OpenCommunity(post.community.id)),
             )
             .push(
                 button::text(&post.creator.name)
+                    .leading_icon(media.person_avatar(&post.creator))
                     .padding([0, space.space_xxxs])
                     .on_press_maybe(
                         (!post.creator.deleted).then_some(Message::OpenPerson(post.creator.id)),
@@ -190,19 +307,22 @@ impl Post {
             {
                 content = content
                     .push(widget::text::caption("Comment in context"))
-                    .push(self.comment_card(comment, can_write, signed_in, account_busy, 0));
+                    .push(self.comment_card(comment, can_write, signed_in, account_busy, 0, media));
             } else if let Some(error) = &self.focus_error {
                 content = content.push(widget::text::body(error));
             } else {
                 content = content.push(widget::text::caption("Loading comment…"));
             }
         }
-        if let Some(url) = &post.post.url {
-            content = content
-                .push(button::link(url.to_string()).on_press(Message::Link(url.to_string())));
+        if let Some(preview) = link_preview(&post.post, media) {
+            content = content.push(preview);
         }
         if post.post.body.as_ref().is_some_and(|body| !body.is_empty()) {
-            content = content.push(render_markdown(&self.body, Message::Link));
+            content = content.push(markdown::view_with(
+                self.body.items(),
+                markdown_settings(),
+                &DiscussionMarkdown(media),
+            ));
         }
 
         let mut actions = widget::row::with_capacity(2)
@@ -314,6 +434,7 @@ impl Post {
                     signed_in,
                     account_busy,
                     comment.path.len().saturating_sub(1).min(4),
+                    media,
                 ));
             }
         }
@@ -349,6 +470,7 @@ impl Post {
         signed_in: bool,
         account_busy: bool,
         depth: usize,
+        media: &'a Media,
     ) -> Element<'a, Message> {
         let space = cosmic::theme::active().cosmic().spacing;
         let id = comment.data.comment.id;
@@ -356,9 +478,9 @@ impl Post {
         let header = widget::row::with_capacity(5)
             .align_y(Alignment::Center)
             .spacing(space.space_xxs)
-            .push(icon::from_name("avatar-default-symbolic").size(16).icon())
             .push(
                 button::text(&comment.data.creator.name)
+                    .leading_icon(media.person_avatar(&comment.data.creator))
                     .padding([0, space.space_xxxs])
                     .on_press_maybe(
                         (!comment.data.creator.deleted)
@@ -389,7 +511,11 @@ impl Post {
             .spacing(space.space_xxxs)
             .push(header);
         if !collapsed {
-            row = row.push(render_markdown(&comment.body, Message::Link));
+            row = row.push(markdown::view_with(
+                comment.body.items(),
+                markdown_settings(),
+                &DiscussionMarkdown(media),
+            ));
             let can_act = signed_in
                 && !account_busy
                 && self.comment_action.is_none()

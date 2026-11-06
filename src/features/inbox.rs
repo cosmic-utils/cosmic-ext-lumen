@@ -1,5 +1,5 @@
 //! Account-scoped replies and mentions.
-use crate::shared::{api::Api, presentation::age};
+use crate::shared::{api::Api, media::Media, presentation::age};
 use cosmic::{
     Element,
     iced::{Alignment, Length, Task, core::text::Wrapping},
@@ -34,6 +34,7 @@ pub struct Notice {
     post: PostId,
     title: String,
     author: String,
+    avatar: Option<String>,
     published: i64,
     read: bool,
 }
@@ -262,7 +263,18 @@ impl Inbox {
         (Task::none(), None)
     }
 
-    pub fn view(&self, selected: Option<CommentId>, account_busy: bool) -> Element<'_, Message> {
+    pub fn avatar_urls(&self) -> impl Iterator<Item = String> + '_ {
+        self.notices
+            .iter()
+            .filter_map(|notice| notice.avatar.clone())
+    }
+
+    pub fn view(
+        &self,
+        selected: Option<CommentId>,
+        account_busy: bool,
+        media: &Media,
+    ) -> Element<'_, Message> {
         let theme = cosmic::theme::active();
         let space = theme.cosmic().spacing;
         let radius = theme.cosmic().corner_radii.radius_s;
@@ -315,9 +327,15 @@ impl Inbox {
             let read_control = button::icon(icon::from_name(symbol))
                 .tooltip(label)
                 .on_press_maybe(can_open.then_some(Message::SetRead(notice.id, !notice.read)));
-            let metadata = widget::row::with_capacity(2)
+            let metadata = widget::row::with_capacity(3)
                 .spacing(space.space_xxs)
                 .align_y(Alignment::Center)
+                .push(
+                    media
+                        .avatar(notice.avatar.as_deref(), "avatar-default-symbolic")
+                        .icon()
+                        .size(16),
+                )
                 .push(
                     widget::text::caption(format!(
                         "{} {action} · {}{status}",
@@ -386,6 +404,7 @@ async fn load(api: Api, page: i64) -> Result<Vec<Notice>, String> {
             post: item.post.id,
             title: item.post.name,
             author: item.creator.name,
+            avatar: item.creator.avatar.map(|url| url.to_string()),
             published: item.comment_reply.published.timestamp(),
             read: item.comment_reply.read,
         })
@@ -395,6 +414,7 @@ async fn load(api: Api, page: i64) -> Result<Vec<Notice>, String> {
             post: item.post.id,
             title: item.post.name,
             author: item.creator.name,
+            avatar: item.creator.avatar.map(|url| url.to_string()),
             published: item.person_mention.published.timestamp(),
             read: item.person_mention.read,
         }))
@@ -501,6 +521,7 @@ mod tests {
                 post: post.post.id,
                 title: post.post.name.clone(),
                 author: post.creator.name.clone(),
+                avatar: None,
                 published: comment.comment.published.timestamp(),
                 read: !read,
             });

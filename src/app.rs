@@ -4,13 +4,13 @@ mod view;
 
 use crate::{
     features::{accounts, community, feed, inbox, instance, post, publish},
-    shared::links::open_web_link,
+    shared::{links::open_web_link, media},
 };
 use cosmic::{
     ApplicationExt,
     app::Task,
     iced::{self, Subscription, keyboard, widget::operation, window},
-    widget::{markdown, nav_bar},
+    widget::{markdown, nav_bar, pane_grid},
 };
 use lemmy_api_common::{
     lemmy_db_schema::{SubscribedType, newtypes::CommunityId, source::community::Community},
@@ -24,6 +24,11 @@ enum Destination {
     #[default]
     Feed,
     Inbox,
+}
+
+enum Column {
+    Feed,
+    Discussion,
 }
 
 #[derive(Clone, Copy)]
@@ -53,6 +58,7 @@ pub struct App {
     instance: instance::Instance,
     feed: feed::Feed,
     post: post::Post,
+    media: media::Media,
     inbox: inbox::Inbox,
     publish: publish::Publish,
     nav: nav_bar::Model,
@@ -64,6 +70,7 @@ pub struct App {
     session: u64,
     search: String,
     feed_offset: f32,
+    columns: pane_grid::State<Column>,
     width: f32,
     focused: bool,
     compact: bool,
@@ -75,6 +82,7 @@ pub enum Message {
     Instance(instance::Message),
     Feed(feed::Message),
     Post(post::Message),
+    Media(media::Message),
     Inbox(inbox::Message),
     Publish(publish::Message),
     OpenAccounts,
@@ -83,8 +91,8 @@ pub enum Message {
     Search,
     FocusSearch,
     NewPost,
-    ToggleDensity,
     Resized(window::Id, f32),
+    ResizeColumns(pane_grid::ResizeEvent),
     CommunityLoaded(u64, Result<Box<CommunityView>, String>),
     FollowCommunity,
     Followed(u64, CommunityId, Result<Box<CommunityView>, String>),
@@ -109,6 +117,7 @@ impl cosmic::Application for App {
         let mut app = Self {
             accounts: accounts::Accounts::new(http.clone()),
             core,
+            media: media::Media::new(http.clone()),
             instance: instance::Instance::new(http),
             feed: feed::Feed::default(),
             post: post::Post::default(),
@@ -123,6 +132,12 @@ impl cosmic::Application for App {
             session: 0,
             search: String::new(),
             feed_offset: 0.0,
+            columns: pane_grid::State::with_configuration(pane_grid::Configuration::Split {
+                axis: pane_grid::Axis::Vertical,
+                ratio: 0.43,
+                a: Box::new(pane_grid::Configuration::Pane(Column::Feed)),
+                b: Box::new(pane_grid::Configuration::Pane(Column::Discussion)),
+            }),
             width: 1100.0,
             focused: false,
             compact: false,
@@ -138,7 +153,12 @@ impl cosmic::Application for App {
             .restore()
             .map(Message::Accounts)
             .map(cosmic::Action::App);
-        (app, Task::batch([title, restore]))
+        let avatars = app.load_navigation_avatars();
+        (app, Task::batch([title, restore, avatars]))
+    }
+
+    fn nav_bar(&self) -> Option<cosmic::Element<'_, cosmic::Action<Message>>> {
+        self.sidebar()
     }
 
     fn nav_model(&self) -> Option<&nav_bar::Model> {
@@ -164,12 +184,16 @@ impl cosmic::Application for App {
         }
     }
 
+    fn header_start(&self) -> Vec<cosmic::Element<'_, Message>> {
+        vec![self.account_control()]
+    }
+
     fn header_center(&self) -> Vec<cosmic::Element<'_, Message>> {
         self.search_control()
     }
 
     fn header_end(&self) -> Vec<cosmic::Element<'_, Message>> {
-        self.header_controls()
+        self.new_post_control()
     }
 
     fn context_drawer(&self) -> Option<cosmic::app::ContextDrawer<'_, Message>> {
@@ -177,6 +201,9 @@ impl cosmic::Application for App {
     }
 
     fn dialog(&self) -> Option<cosmic::Element<'_, Message>> {
+        if let Some(image) = self.media.dialog() {
+            return Some(image.map(Message::Media));
+        }
         self.publish.visible.then(|| {
             self.publish
                 .view(self.accounts.follows())
@@ -189,6 +216,9 @@ impl cosmic::Application for App {
     }
 
     fn on_escape(&mut self) -> Task<Message> {
+        if self.media.is_open() {
+            return self.update(Message::Media(media::Message::Close));
+        }
         if self.publish.visible {
             return self.update(Message::Publish(publish::Message::Close));
         }
@@ -261,9 +291,30 @@ impl cosmic::Application for App {
             Message::Feed(feed::Message::OpenLink(url)) => self.update(Message::OpenLink(url)),
             Message::Feed(feed::Message::OpenCommunity(id)) => self.open_community(id),
             Message::Feed(feed::Message::CommunityDetails(id)) => self.open_community_details(id),
+            Message::Feed(feed::Message::ToggleDensity) => {
+                self.compact = !self.compact;
+                Task::none()
+            }
             Message::Feed(message) => self.update_feed(message),
             Message::Inbox(message) => self.update_inbox(message),
             Message::Post(message) => self.update_post(message),
+            Message::Media(media::Message::OpenInBrowser(url)) => {
+                self.update(Message::OpenLink(url))
+            }
+            Message::Media(message @ media::Message::Loaded(_, media::Size::Avatar, _)) => {
+                let nav_changed = matches!(&message, media::Message::Loaded(url, _, Some(_))
+                    if self.navigation_communities().any(|community| community.icon.as_ref().is_some_and(|icon| icon.as_str() == url)));
+                let _ = self.media.update(message);
+                if nav_changed {
+                    self.rebuild_nav();
+                }
+                Task::none()
+            }
+            Message::Media(message) => self
+                .media
+                .update(message)
+                .map(Message::Media)
+                .map(cosmic::Action::App),
             Message::Publish(message) => {
                 if self.accounts.busy && matches!(message, publish::Message::Submit) {
                     return Task::none();
@@ -331,8 +382,8 @@ impl cosmic::Application for App {
                 );
                 Task::none()
             }
-            Message::ToggleDensity => {
-                self.compact = !self.compact;
+            Message::ResizeColumns(event) => {
+                self.columns.resize(event.split, event.ratio);
                 Task::none()
             }
             Message::Resized(id, width) if Some(id) == self.core.main_window_id() => {

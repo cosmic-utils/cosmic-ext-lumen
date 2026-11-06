@@ -26,6 +26,23 @@ pub fn community_handle(community: &Community) -> String {
     format!("{}@{host}", community.name)
 }
 
+pub fn community_title(community: &Community) -> &str {
+    let title = community.title.trim();
+    if title.is_empty() {
+        &community.name
+    } else {
+        title
+    }
+}
+
+pub fn community_label(community: &Community) -> String {
+    let name = community_title(community);
+    match community.actor_id.host_str() {
+        Some(host) => format!("{name}@{host}"),
+        None => name.to_owned(),
+    }
+}
+
 pub fn person_handle(person: &Person) -> String {
     let host = person.actor_id.host_str().unwrap_or_default();
     format!("@{}@{host}", person.name)

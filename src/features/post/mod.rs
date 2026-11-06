@@ -7,7 +7,7 @@ pub(crate) use view::render_markdown;
 
 pub const SCROLL_ID: &str = "lemmy-discussion";
 
-use crate::shared::{api::Api, links::open_web_link};
+use crate::shared::{api::Api, links::open_web_link, media};
 use cosmic::{
     iced::{Task, clipboard, widget::operation},
     widget::{markdown, text_editor},
@@ -124,6 +124,7 @@ pub enum Message {
     ToggleComposer,
     Collapse(i32),
     Link(String),
+    OpenImage(String),
     Loaded(u64, Result<GetCommentsResponse, String>),
     Act(u64, Action),
     ActionFinished(u64, Result<Box<PostView>, String>),
@@ -163,6 +164,42 @@ impl Post {
         self.set_selected(post);
         self.page = 1;
         self.load()
+    }
+
+    pub fn avatar_urls(&self) -> impl Iterator<Item = String> + '_ {
+        self.selected
+            .iter()
+            .filter_map(|post| post.creator.avatar.as_ref())
+            .chain(
+                self.selected
+                    .iter()
+                    .filter_map(|post| post.community.icon.as_ref()),
+            )
+            .chain(
+                self.comments
+                    .iter()
+                    .filter_map(|comment| comment.data.creator.avatar.as_ref()),
+            )
+            .map(ToString::to_string)
+    }
+
+    pub fn image_urls(&self) -> Vec<String> {
+        let Some(post) = self.selected.as_ref().filter(|post| {
+            !post.post.nsfw && !post.community.nsfw && !post.post.deleted && !post.post.removed
+        }) else {
+            return Vec::new();
+        };
+        media::direct_image(&post.post)
+            .or_else(|| media::thumbnail(&post.post))
+            .into_iter()
+            .map(str::to_owned)
+            .chain(self.body.images().iter().cloned())
+            .chain(
+                self.comments
+                    .iter()
+                    .flat_map(|comment| comment.body.images().iter().cloned()),
+            )
+            .collect()
     }
 
     pub fn open_at(&mut self, api: Api, post: PostView, comment: CommentId) -> Task<Message> {

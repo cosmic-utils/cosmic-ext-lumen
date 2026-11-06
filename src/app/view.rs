@@ -1,18 +1,73 @@
-use super::{App, Destination, Drawer, Message, SEARCH_ID};
+use super::{App, Column, Destination, Drawer, Message, SEARCH_ID};
 use crate::{
     features::{feed, post},
-    shared::presentation::{community_handle, toggle_button_class},
+    shared::presentation::{community_label, community_title, toggle_button_class},
 };
 use cosmic::{
     Element,
     app::{ContextDrawer, context_drawer},
     cosmic_theme::Layer,
-    iced::Length,
-    widget::{self, button, icon},
+    iced::{Alignment, Length, core::text::Wrapping},
+    widget::{self, button, icon, pane_grid},
 };
 use lemmy_api_common::lemmy_db_schema::SubscribedType;
 
 impl App {
+    pub(super) fn sidebar(&self) -> Option<Element<'_, cosmic::Action<Message>>> {
+        if !self.core.nav_bar_active() {
+            return None;
+        }
+
+        let theme = cosmic::theme::active();
+        let space = theme.cosmic().spacing;
+        let radius = theme.cosmic().corner_radii.radius_s;
+        let mut entries =
+            widget::column::with_capacity(self.nav.iter().count()).spacing(space.space_xxs);
+        for id in self.nav.iter() {
+            if self.nav.divider_above(id) == Some(true) {
+                entries = entries.push(widget::divider::horizontal::light());
+            }
+            let mut label = widget::column::with_capacity(2).width(Length::Fill).push(
+                widget::text::body(self.nav.text(id).unwrap_or_default())
+                    .wrapping(Wrapping::WordOrGlyph),
+            );
+            if let Some(server) = self.nav.data::<String>(id) {
+                label = label.push(widget::text::caption(server).wrapping(Wrapping::WordOrGlyph));
+            }
+            let row = widget::row::with_capacity(2)
+                .spacing(space.space_xxs)
+                .align_y(Alignment::Center)
+                .push_maybe(self.nav.icon(id).cloned())
+                .push(label);
+            entries = entries.push(
+                button::custom(row)
+                    .class(button::ButtonClass::ListItem(radius))
+                    .selected(self.nav.is_active(id))
+                    .padding([space.space_xxs, space.space_s])
+                    .width(Length::Fill)
+                    .on_press(cosmic::Action::Cosmic(cosmic::app::Action::NavBar(id))),
+            );
+        }
+        let width = if self.core.is_condensed() {
+            Length::Fill
+        } else {
+            Length::Fixed(240.0)
+        };
+        Some(
+            widget::container(
+                widget::scrollable(widget::container(entries).padding(space.space_xxs))
+                    .class(cosmic::style::iced::Scrollable::Minimal)
+                    .height(Length::Fill),
+            )
+            .width(width)
+            .height(Length::Fill)
+            .class(cosmic::theme::Container::custom(
+                widget::nav_bar::nav_bar_style,
+            ))
+            .into(),
+        )
+    }
+
     pub(super) fn search_control(&self) -> Vec<Element<'_, Message>> {
         if self.feed.api().is_none() {
             return Vec::new();
@@ -31,56 +86,44 @@ impl App {
         vec![search.into()]
     }
 
-    pub(super) fn header_controls(&self) -> Vec<Element<'_, Message>> {
-        let mut controls = Vec::with_capacity(3);
-        if self.feed.api().is_some() && self.width >= 850.0 {
-            controls.push(
-                button::icon(icon::from_name("view-list-symbolic"))
-                    .tooltip(if self.compact {
-                        "Comfortable feed spacing"
-                    } else {
-                        "Compact feed spacing"
-                    })
-                    .class(toggle_button_class(self.compact, button::ButtonClass::Icon))
-                    .on_press(Message::ToggleDensity)
-                    .into(),
-            );
+    pub(super) fn new_post_control(&self) -> Vec<Element<'_, Message>> {
+        if !self.feed.signed_in() {
+            return Vec::new();
         }
-        if self.feed.signed_in() {
-            if self.width >= 680.0 {
-                controls.push(
-                    button::suggested("New post")
-                        .leading_icon(icon::from_name("list-add-symbolic"))
-                        .on_press_maybe((!self.accounts.busy).then_some(Message::NewPost))
-                        .into(),
-                );
-            } else {
-                controls.push(
-                    button::icon(icon::from_name("list-add-symbolic"))
-                        .tooltip("New post")
-                        .on_press_maybe((!self.accounts.busy).then_some(Message::NewPost))
-                        .into(),
-                );
-            }
-        }
-        let account = self.accounts.active();
-        if self.width >= 680.0 {
-            controls.push(
-                button::standard(account.map_or("Accounts", |account| account.name.as_str()))
-                    .leading_icon(icon::from_name("avatar-default-symbolic"))
-                    .trailing_icon(icon::from_name("pan-down-symbolic"))
-                    .on_press(Message::OpenAccounts)
-                    .into(),
-            );
+        let action = (!self.accounts.busy).then_some(Message::NewPost);
+        let control = if self.width >= 680.0 {
+            button::suggested("New post")
+                .leading_icon(icon::from_name("list-add-symbolic"))
+                .on_press_maybe(action)
+                .into()
         } else {
-            controls.push(
-                button::icon(icon::from_name("avatar-default-symbolic"))
-                    .tooltip(account.map_or("Accounts", |account| account.name.as_str()))
-                    .on_press(Message::OpenAccounts)
-                    .into(),
-            );
+            button::icon(icon::from_name("list-add-symbolic"))
+                .tooltip("New post")
+                .on_press_maybe(action)
+                .into()
+        };
+        vec![control]
+    }
+
+    pub(super) fn account_control(&self) -> Element<'_, Message> {
+        let account = self.accounts.active();
+        let avatar = self.media.avatar(
+            account.and_then(|account| account.avatar.as_deref()),
+            "avatar-default-symbolic",
+        );
+        let label = account.map_or("Accounts", |account| account.name.as_str());
+        if self.width >= 680.0 {
+            button::standard(label)
+                .leading_icon(avatar)
+                .trailing_icon(icon::from_name("pan-down-symbolic"))
+                .on_press(Message::OpenAccounts)
+                .into()
+        } else {
+            button::icon(avatar)
+                .tooltip(label)
+                .on_press(Message::OpenAccounts)
+                .into()
         }
-        controls
     }
 
     pub(super) fn workspace(&self) -> Element<'_, Message> {
@@ -107,67 +150,77 @@ impl App {
             .into();
         }
 
-        let split = self.can_split() && !self.focused;
-        let discussion = self.post.selected.as_ref();
-        let show_feed = split || discussion.is_none();
-        let show_discussion = split || discussion.is_some();
-        let mut row = widget::row::with_capacity(2).spacing(space.space_xxs);
-        if show_feed {
-            let list = match self.destination {
-                Destination::Feed => self
-                    .feed
-                    .view(
-                        self.feed_title(),
-                        discussion.map(|post| post.post.id),
-                        self.compact,
-                    )
-                    .map(Message::Feed),
-                Destination::Inbox => self
-                    .inbox
-                    .view(self.post.focused_comment, self.accounts.busy)
-                    .map(Message::Inbox),
-            };
-            let width = if split {
-                let sidebar = if self.core.nav_bar_active() {
-                    240.0
-                } else {
-                    0.0
+        let body = if self.can_split() && !self.focused {
+            pane_grid::PaneGrid::new(&self.columns, |_, column, _| {
+                let content = match column {
+                    Column::Feed => self.feed_column(),
+                    Column::Discussion => cosmic::iced::widget::responsive(|size| {
+                        self.discussion_column(false, size.width < 420.0)
+                    })
+                    .into(),
                 };
-                Length::Fixed(((self.width - sidebar) * 0.36).clamp(280.0, 400.0))
-            } else {
-                Length::Fill
-            };
-            row = row.push(
-                widget::layer_container(list)
-                    .layer(Layer::Primary)
-                    .padding(space.space_xxs)
-                    .width(width)
-                    .height(Length::Fill),
-            );
-        }
-        if show_discussion {
-            row = row.push(
-                widget::layer_container(
-                    self.post
-                        .view(
-                            self.accounts.busy,
-                            !split,
-                            self.can_split(),
-                            self.focused,
-                            self.width < 420.0,
-                        )
-                        .map(Message::Post),
-                )
-                .layer(Layer::Background)
-                .width(Length::Fill)
-                .height(Length::Fill),
-            );
-        }
-        widget::container(row)
+                pane_grid::Content::new(content)
+            })
+            .spacing(space.space_xxs)
+            .min_size(270)
+            .on_resize(8, Message::ResizeColumns)
+            .into()
+        } else if self.post.selected.is_some() {
+            self.discussion_column(true, self.width < 420.0)
+        } else {
+            self.feed_column()
+        };
+        widget::container(body)
             .padding([0, space.space_xxs, space.space_xxs, space.space_xxs])
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
+    }
+
+    fn feed_column(&self) -> Element<'_, Message> {
+        let list = match self.destination {
+            Destination::Feed => self
+                .feed
+                .view(
+                    self.feed_title(),
+                    self.community_scope.as_ref().filter(|community| {
+                        self.feed.scope() == feed::Scope::Community(community.id)
+                    }),
+                    self.post.selected.as_ref().map(|post| post.post.id),
+                    self.compact,
+                    &self.media,
+                )
+                .map(Message::Feed),
+            Destination::Inbox => self
+                .inbox
+                .view(self.post.focused_comment, self.accounts.busy, &self.media)
+                .map(Message::Inbox),
+        };
+        widget::layer_container(list)
+            .layer(Layer::Primary)
+            .padding(cosmic::theme::active().cosmic().spacing.space_xxs)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    }
+
+    fn discussion_column(&self, show_back: bool, narrow: bool) -> Element<'_, Message> {
+        widget::layer_container(
+            self.post
+                .view(
+                    self.accounts.busy,
+                    show_back,
+                    self.can_split(),
+                    self.focused,
+                    narrow,
+                    &self.media,
+                )
+                .map(Message::Post),
+        )
+        .layer(Layer::Background)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
     }
 
     fn feed_title(&self) -> String {
@@ -186,10 +239,10 @@ impl App {
                         .unwrap_or_else(|| person.name.clone())
                 },
             ),
-            feed::Scope::Community(_) => self
-                .community_scope
-                .as_ref()
-                .map_or_else(|| "Community".into(), |community| community.title.clone()),
+            feed::Scope::Community(_) => self.community_scope.as_ref().map_or_else(
+                || "Community".into(),
+                |community| community_title(community).to_owned(),
+            ),
         }
     }
 
@@ -204,7 +257,7 @@ impl App {
                         .push(self.instance.view().map(Message::Instance))
                         .push(widget::divider::horizontal::light());
                 }
-                content = content.push(self.accounts.view().map(Message::Accounts));
+                content = content.push(self.accounts.view(&self.media).map(Message::Accounts));
                 Some(context_drawer(content, Message::CloseDrawer).title("Accounts and instances"))
             }
             Drawer::Community(details) => {
@@ -212,10 +265,14 @@ impl App {
                 match &details.result {
                     Some(Ok(view)) => {
                         let community = &view.community;
-                        let handle = community_handle(community);
                         content = content
-                            .push(widget::text::title3(&community.title))
-                            .push(widget::text::caption(format!("!{handle}")))
+                            .push(
+                                widget::row::with_capacity(2)
+                                    .align_y(cosmic::iced::Alignment::Center)
+                                    .spacing(space.space_xxs)
+                                    .push(self.media.community_avatar(community).icon().size(24))
+                                    .push(widget::text::title3(community_label(community))),
+                            )
                             .push(widget::text::caption(format!(
                                 "{} subscribers",
                                 view.counts.subscribers

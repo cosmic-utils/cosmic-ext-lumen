@@ -1,12 +1,16 @@
 mod storage;
-use crate::shared::api::Api;
+use crate::shared::{api::Api, media::Media};
 use cosmic::{
     Element,
     iced::{Length, Task},
     widget,
 };
 use lemmy_api_common::{
-    lemmy_db_schema::{SubscribedType, newtypes::PersonId, source::community::Community},
+    lemmy_db_schema::{
+        SubscribedType,
+        newtypes::PersonId,
+        source::{community::Community, person::Person},
+    },
     lemmy_db_views_actor::structs::CommunityView,
     person::{Login, LoginResponse},
     site::GetSiteResponse,
@@ -18,6 +22,8 @@ pub struct Account {
     pub id: String,
     pub instance: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
 }
 #[derive(Default, Serialize, Deserialize)]
 pub struct Registry {
@@ -33,7 +39,7 @@ pub enum Message {
     Switch(usize),
     Anonymous,
     Remove,
-    Ready(Result<Session, String>),
+    Ready(Result<Box<Session>, String>),
     Removed(Result<Option<String>, String>),
 }
 #[derive(Clone)]
@@ -95,7 +101,7 @@ impl Accounts {
         }
     }
     fn switch(&mut self, index: usize) -> Task<Message> {
-        let Some(account) = self.registry.accounts.get(index).cloned() else {
+        let Some(mut account) = self.registry.accounts.get(index).cloned() else {
             return Task::none();
         };
         self.busy = true;
@@ -108,7 +114,10 @@ impl Accounts {
                     .await
                     .map_err(|_| "Credential worker failed".to_string())??;
                 let api = Api::new(http, &account.instance)?.authenticated(token);
-                let (_, person_id, follows) = validate(&api).await?;
+                let (person, follows) = validate(&api).await?;
+                let person_id = person.id;
+                account.name = person.name;
+                account.avatar = person.avatar.map(|url| url.to_string());
                 Ok(Session {
                     account,
                     api,
@@ -116,7 +125,7 @@ impl Accounts {
                     person_id,
                 })
             },
-            Message::Ready,
+            |result| Message::Ready(result.map(Box::new)),
         )
     }
     pub fn update(&mut self, message: Message, instance: &str) -> (Task<Message>, Option<Api>) {
@@ -162,15 +171,21 @@ impl Accounts {
                                 .ok_or("No session token returned")?
                                 .into_inner();
                             let api = api.authenticated(token.clone());
-                            let (name, person_id, follows) = validate(&api).await?;
-                            let account = existing
-                                .into_iter()
-                                .find(|a| a.instance == api.base.as_str() && a.name == name)
-                                .unwrap_or(Account {
-                                    id: uuid::Uuid::new_v4().to_string(),
-                                    instance: api.base.to_string(),
-                                    name,
-                                });
+                            let (person, follows) = validate(&api).await?;
+                            let person_id = person.id;
+                            let id = existing
+                                .iter()
+                                .find(|a| a.instance == api.base.as_str() && a.name == person.name)
+                                .map_or_else(
+                                    || uuid::Uuid::new_v4().to_string(),
+                                    |account| account.id.clone(),
+                                );
+                            let account = Account {
+                                id,
+                                instance: api.base.to_string(),
+                                name: person.name,
+                                avatar: person.avatar.map(|url| url.to_string()),
+                            };
                             let id = account.id.clone();
                             tokio::task::spawn_blocking(move || storage::write_token(&id, &token))
                                 .await
@@ -182,7 +197,7 @@ impl Accounts {
                                 person_id,
                             })
                         },
-                        Message::Ready,
+                        |result| Message::Ready(result.map(Box::new)),
                     ),
                     None,
                 );
@@ -190,7 +205,7 @@ impl Accounts {
             Message::Switch(index) if !self.busy => return (self.switch(index), None),
             Message::Ready(result) => {
                 self.busy = false;
-                match result {
+                match result.map(|session| *session) {
                     Ok(Session {
                         account,
                         api,
@@ -201,8 +216,15 @@ impl Accounts {
                         self.follows = follows;
                         self.person_id = Some(person_id);
                         self.registry.active = Some(account.id.clone());
-                        if !self.registry.accounts.iter().any(|a| a.id == account.id) {
-                            self.registry.accounts.push(account)
+                        if let Some(saved) = self
+                            .registry
+                            .accounts
+                            .iter_mut()
+                            .find(|item| item.id == account.id)
+                        {
+                            *saved = account;
+                        } else {
+                            self.registry.accounts.push(account);
                         }
                         self.error = storage::save(&self.registry).err();
                         return (Task::none(), Some(api));
@@ -290,7 +312,14 @@ impl Accounts {
         }
     }
 
-    pub fn view(&self) -> Element<'_, Message> {
+    pub fn avatars(&self) -> impl Iterator<Item = &str> {
+        self.registry
+            .accounts
+            .iter()
+            .filter_map(|account| account.avatar.as_deref())
+    }
+
+    pub fn view(&self, media: &Media) -> Element<'_, Message> {
         let mut content = widget::column::with_capacity(5).spacing(8);
         let mut picker = widget::column::with_capacity(self.registry.accounts.len() + 2).spacing(4);
         for (index, a) in self.registry.accounts.iter().enumerate() {
@@ -306,7 +335,8 @@ impl Accounts {
                 } else {
                     ""
                 }
-            ));
+            ))
+            .leading_icon(media.avatar(a.avatar.as_deref(), "avatar-default-symbolic"));
             if !self.busy {
                 b = b.on_press(Message::Switch(index))
             }
@@ -348,7 +378,7 @@ impl Accounts {
         content.into()
     }
 }
-async fn validate(api: &Api) -> Result<(String, PersonId, Vec<Community>), String> {
+async fn validate(api: &Api) -> Result<(Person, Vec<Community>), String> {
     let site: GetSiteResponse = api.get("site", &()).await?;
     if !site.version.starts_with("0.19.") {
         return Err("Requires Lemmy 0.19.x".into());
@@ -356,8 +386,7 @@ async fn validate(api: &Api) -> Result<(String, PersonId, Vec<Community>), Strin
     site.my_user
         .map(|u| {
             (
-                u.local_user_view.person.name,
-                u.local_user_view.person.id,
+                u.local_user_view.person,
                 u.follows
                     .into_iter()
                     .map(|follow| follow.community)
@@ -390,6 +419,7 @@ mod tests {
                 id: "a".into(),
                 instance: "https://example.com/".into(),
                 name: "alice".into(),
+                avatar: None,
             }],
             active: Some("a".into()),
         };

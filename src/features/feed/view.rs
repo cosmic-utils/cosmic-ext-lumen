@@ -1,89 +1,52 @@
 use super::{Feed, Message, Scope, SearchKind, Sort};
 use crate::{
     features::post::render_markdown,
-    shared::presentation::{age, community_handle, person_handle, selectable_card},
+    shared::{
+        media::{self, Media, Size},
+        presentation::{
+            age, community_handle, community_label, person_handle, selectable_card,
+            toggle_button_class,
+        },
+    },
 };
 use cosmic::{
     Element,
-    iced::{Alignment, Length, core::text::Wrapping},
+    iced::{
+        Alignment, Length,
+        core::text::{Ellipsize, EllipsizeHeightLimit, Wrapping},
+    },
     widget::{self, button, icon},
 };
-use lemmy_api_common::lemmy_db_schema::newtypes::PostId;
+use lemmy_api_common::lemmy_db_schema::{newtypes::PostId, source::community::Community};
 
 pub const SCROLL_ID: &str = "lemmy-feed";
 
 impl Feed {
-    pub fn view(
-        &self,
+    pub fn view<'a>(
+        &'a self,
         title: String,
+        community: Option<&'a Community>,
         selected: Option<PostId>,
         compact: bool,
-    ) -> Element<'_, Message> {
+        media: &'a Media,
+    ) -> Element<'a, Message> {
         let space = cosmic::theme::active().cosmic().spacing;
-        let mut controls = widget::row::with_capacity(5)
-            .spacing(space.space_xxs)
-            .align_y(Alignment::Center)
-            .push(
-                widget::text::title3(title)
-                    .width(Length::Fill)
-                    .wrapping(Wrapping::WordOrGlyph),
-            );
         let comments = self.viewing_comments();
         let reference = self.viewing_reference();
         let searching = self.scope == Scope::Search && !reference;
         let communities = searching && self.search_type == SearchKind::Communities;
         let people = searching && self.search_type == SearchKind::People;
-        let profile = matches!(self.scope, Scope::Profile(_));
-        if self.scope == Scope::Saved {
-            controls = controls.push(widget::dropdown(
-                &["Posts", "Comments"][..],
-                Some(usize::from(comments)),
-                Message::SavedTab,
-            ));
-        }
-        if profile {
-            controls = controls.push(widget::dropdown(
-                &["Posts", "Comments"][..],
-                Some(usize::from(self.profile_comments)),
-                Message::ProfileTab,
-            ));
-        }
-        if !self.viewing_saved_comments() && !communities && !people && !reference {
-            controls = controls.push(widget::dropdown(
-                Sort::LABELS.as_slice(),
-                Some(self.sort.index()),
-                Message::Sort,
-            ));
-        }
-        controls = controls.push(
-            button::icon(icon::from_name("view-refresh-symbolic"))
-                .tooltip("Refresh feed")
-                .on_press_maybe((!self.busy && self.api.is_some()).then_some(Message::Refresh)),
-        );
-        if let Scope::Community(id) = self.scope {
-            controls = controls.push(
-                button::icon(icon::from_name("dialog-information-symbolic"))
-                    .tooltip("Community details")
-                    .on_press(Message::CommunityDetails(id)),
-            );
-        }
+        let header = self.header(title, community, media, compact);
         let mut content =
             widget::column::with_capacity(self.posts.len() + 3).spacing(space.space_xxs);
-        if let Some(person) = self.profile() {
-            let identity = widget::row::with_capacity(2)
-                .spacing(space.space_xxs)
-                .align_y(Alignment::Center)
-                .push(widget::text::body(person_handle(person)).wrapping(Wrapping::WordOrGlyph))
-                .push(
-                    button::icon(icon::from_name("web-browser-symbolic"))
-                        .tooltip("Open profile in browser")
-                        .on_press(Message::OpenLink(person.actor_id.to_string())),
-                );
-            content = content.push(identity);
-            if person.bio.as_ref().is_some_and(|bio| !bio.is_empty()) {
-                content = content.push(render_markdown(&self.profile_bio, Message::OpenLink));
-            }
-            content = content.push(widget::divider::horizontal::light());
+        if self
+            .profile()
+            .and_then(|person| person.bio.as_deref())
+            .is_some_and(|bio| !bio.is_empty())
+        {
+            content = content
+                .push(render_markdown(&self.profile_bio, Message::OpenLink))
+                .push(widget::divider::horizontal::light());
         }
         if let Some(error) = &self.open_error {
             content = content.push(widget::text::body(error));
@@ -137,9 +100,9 @@ impl Feed {
             let metadata = widget::row::with_capacity(3)
                 .spacing(space.space_xxxs)
                 .align_y(Alignment::Center)
-                .push(icon::from_name("system-users-symbolic").size(16).icon())
+                .push(media.community_avatar(&post.community).icon().size(16))
                 .push(
-                    widget::text::caption(format!("!{}", community_handle(&post.community)))
+                    widget::text::caption(community_label(&post.community))
                         .width(Length::Fill)
                         .wrapping(Wrapping::WordOrGlyph),
                 )
@@ -154,9 +117,35 @@ impl Feed {
             let card = widget::column::with_capacity(3)
                 .spacing(space.space_xxxs)
                 .push(metadata)
-                .push(widget::text::body(&post.post.name).font(cosmic::font::semibold()))
+                .push(
+                    widget::text::body(&post.post.name)
+                        .font(cosmic::font::semibold())
+                        .wrapping(Wrapping::WordOrGlyph),
+                )
                 .push(stats)
                 .width(Length::Fill);
+            let picture = media::thumbnail(&post.post)
+                .filter(|_| !post.community.nsfw)
+                .and_then(|url| {
+                    media
+                        .get(url, Size::Thumbnail)
+                        .or_else(|| media.get(url, Size::Preview))
+                });
+            let card: Element<'_, Message> = if let Some(picture) = picture {
+                let side = if compact { 44.0 } else { 64.0 };
+                widget::row::with_capacity(2)
+                    .spacing(space.space_xs)
+                    .align_y(Alignment::Center)
+                    .push(card)
+                    .push(media::image_view(
+                        picture,
+                        Length::Fixed(side),
+                        Length::Fixed(side),
+                    ))
+                    .into()
+            } else {
+                card.into()
+            };
             content = content.push(selectable_card(
                 card,
                 if compact {
@@ -179,12 +168,18 @@ impl Feed {
             let card = widget::column::with_capacity(3)
                 .spacing(space.space_xxxs)
                 .push(
-                    widget::text::caption(format!(
-                        "{} · !{}",
-                        comment.creator.name,
-                        community_handle(&comment.community)
-                    ))
-                    .wrapping(Wrapping::WordOrGlyph),
+                    widget::row::with_capacity(2)
+                        .align_y(Alignment::Center)
+                        .spacing(space.space_xxxs)
+                        .push(media.person_avatar(&comment.creator).icon().size(16))
+                        .push(
+                            widget::text::caption(format!(
+                                "{} · {}",
+                                comment.creator.name,
+                                community_label(&comment.community)
+                            ))
+                            .wrapping(Wrapping::WordOrGlyph),
+                        ),
                 )
                 .push(widget::text::body(&comment.post.name).font(cosmic::font::semibold()))
                 .push(widget::text::body(label).wrapping(Wrapping::WordOrGlyph))
@@ -204,14 +199,15 @@ impl Feed {
         }
         for result in &self.communities {
             let community = &result.community;
-            let card = widget::column::with_capacity(2)
-                .spacing(space.space_xxxs)
-                .push(widget::text::body(&community.title).font(cosmic::font::semibold()))
-                .push(widget::text::caption(format!(
-                    "!{}",
-                    community_handle(community)
-                )))
+            let label = widget::text::body(community_label(community))
+                .font(cosmic::font::semibold())
+                .wrapping(Wrapping::WordOrGlyph)
                 .width(Length::Fill);
+            let card = widget::row::with_capacity(2)
+                .align_y(Alignment::Center)
+                .spacing(space.space_xs)
+                .push(media.community_avatar(community).icon().size(24))
+                .push(label);
             content = content.push(selectable_card(
                 card,
                 if compact {
@@ -234,6 +230,11 @@ impl Feed {
                 )
                 .push(widget::text::caption(person_handle(person)).wrapping(Wrapping::WordOrGlyph))
                 .width(Length::Fill);
+            let card = widget::row::with_capacity(2)
+                .align_y(Alignment::Center)
+                .spacing(space.space_xs)
+                .push(media.person_avatar(person).icon().size(24))
+                .push(card);
             content = content.push(selectable_card(
                 card,
                 if compact {
@@ -263,7 +264,7 @@ impl Feed {
         }
         let mut layout = widget::column::with_capacity(3)
             .spacing(space.space_xs)
-            .push(controls);
+            .push(header);
         if searching {
             let mut filters =
                 widget::row::with_capacity(2)
@@ -275,11 +276,7 @@ impl Feed {
                     ));
             if self.search_type.supports_community() && !self.search_communities.is_empty() {
                 let mut labels = vec!["All communities".to_owned()];
-                labels.extend(
-                    self.search_communities
-                        .iter()
-                        .map(|community| format!("!{}", community_handle(community))),
-                );
+                labels.extend(self.search_communities.iter().map(community_label));
                 let selected = self
                     .search_communities
                     .iter()
@@ -302,5 +299,128 @@ impl Feed {
             )
             .height(Length::Fill)
             .into()
+    }
+    fn header(
+        &self,
+        title: String,
+        community: Option<&Community>,
+        media: &Media,
+        compact: bool,
+    ) -> Element<'_, Message> {
+        let space = cosmic::theme::active().cosmic().spacing;
+        let profile = matches!(self.scope, Scope::Profile(_));
+        let identity_page = profile || matches!(self.scope, Scope::Community(_));
+        let title = widget::text::title3(title).width(Length::Fill);
+        let title = if identity_page {
+            title
+                .wrapping(Wrapping::None)
+                .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)))
+        } else {
+            title.wrapping(Wrapping::WordOrGlyph)
+        };
+        let mut labels = widget::column::with_capacity(2)
+            .width(Length::Fill)
+            .push(title);
+        let (picture, handle) = community
+            .map(|community| {
+                (
+                    media.community_avatar(community),
+                    community_handle(community),
+                )
+            })
+            .or_else(|| {
+                self.profile()
+                    .map(|person| (media.person_avatar(person), person_handle(person)))
+            })
+            .unzip();
+        if let Some(handle) = handle {
+            labels = labels.push(
+                widget::text::caption(handle)
+                    .wrapping(Wrapping::None)
+                    .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1))),
+            );
+        }
+        let heading = widget::row::with_capacity(2)
+            .spacing(space.space_xxs)
+            .align_y(Alignment::Center)
+            .width(Length::Fill)
+            .push_maybe(picture.map(|picture| picture.icon().size(28)))
+            .push(labels);
+        let mut dropdowns = widget::row::with_capacity(2)
+            .spacing(space.space_xxs)
+            .align_y(Alignment::Center);
+        let reference = self.viewing_reference();
+        let show_sort = !self.viewing_saved_comments()
+            && !reference
+            && (self.scope != Scope::Search || self.search_type.supports_community());
+        if self.scope == Scope::Saved {
+            dropdowns = dropdowns.push(widget::dropdown(
+                &["Posts", "Comments"][..],
+                Some(usize::from(self.viewing_saved_comments())),
+                Message::SavedTab,
+            ));
+        }
+        if profile {
+            dropdowns = dropdowns.push(widget::dropdown(
+                &["Posts", "Comments"][..],
+                Some(usize::from(self.profile_comments)),
+                Message::ProfileTab,
+            ));
+        }
+        if show_sort {
+            dropdowns = dropdowns.push(widget::dropdown(
+                Sort::LABELS.as_slice(),
+                Some(self.sort.index()),
+                Message::Sort,
+            ));
+        }
+        let mut controls = widget::row::with_capacity(3)
+            .spacing(space.space_xxs)
+            .align_y(Alignment::Center);
+        controls = controls.push(
+            button::icon(icon::from_name("view-refresh-symbolic"))
+                .tooltip("Refresh feed")
+                .on_press_maybe((!self.busy && self.api.is_some()).then_some(Message::Refresh)),
+        );
+        controls = controls.push(
+            button::icon(icon::from_name("view-list-symbolic"))
+                .tooltip(if compact {
+                    "Comfortable feed spacing"
+                } else {
+                    "Compact feed spacing"
+                })
+                .class(toggle_button_class(compact, button::ButtonClass::Icon))
+                .on_press(Message::ToggleDensity),
+        );
+        if let Scope::Community(id) = self.scope {
+            controls = controls.push(
+                button::icon(icon::from_name("dialog-information-symbolic"))
+                    .tooltip("Community details")
+                    .on_press(Message::CommunityDetails(id)),
+            );
+        }
+        if let Some(person) = self.profile() {
+            controls = controls.push(
+                button::icon(icon::from_name("web-browser-symbolic"))
+                    .tooltip("Open profile in browser")
+                    .on_press(Message::OpenLink(person.actor_id.to_string())),
+            );
+        }
+        let header = widget::row::with_capacity(3)
+            .spacing(space.space_xxs)
+            .align_y(Alignment::Center)
+            .push(heading);
+        if identity_page {
+            widget::column::with_capacity(2)
+                .spacing(space.space_xxs)
+                .push(header.push(controls))
+                .push(dropdowns.wrap())
+                .into()
+        } else {
+            header
+                .push_maybe((show_sort || self.scope == Scope::Saved).then_some(dropdowns))
+                .push(controls)
+                .into()
+        }
     }
 }

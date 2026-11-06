@@ -1,7 +1,7 @@
 use super::{App, Destination, Drawer, Message, NavItem};
 use crate::{
     features::{feed, inbox, post, publish},
-    shared::{api::Api, presentation::community_handle},
+    shared::{api::Api, media, presentation::community_title},
 };
 use cosmic::{
     ApplicationExt,
@@ -32,6 +32,7 @@ impl App {
 
     pub(super) fn leave_discussion(&mut self) {
         self.post.close();
+        let _ = self.media.update(media::Message::Close);
         self.focused = false;
         self.close_drawer();
     }
@@ -43,6 +44,7 @@ impl App {
         }
         self.instance.input = api.base.to_string();
         self.post.reset();
+        let _ = self.media.update(media::Message::Close);
         self.post.set_person(self.accounts.person_id());
         self.publish = publish::Publish::default();
         self.pending_follow = None;
@@ -63,7 +65,12 @@ impl App {
             .map(Message::Feed)
             .map(cosmic::Action::App);
         self.rebuild_nav();
-        Task::batch([feed, inbox, self.restore_feed_scroll()])
+        Task::batch([
+            feed,
+            inbox,
+            self.restore_feed_scroll(),
+            self.load_navigation_avatars(),
+        ])
     }
 
     pub(super) fn navigate_feed(&mut self, message: feed::Message) -> Task<Message> {
@@ -79,7 +86,11 @@ impl App {
         self.feed_offset = 0.0;
         let task = self.update_feed(message);
         self.rebuild_nav();
-        Task::batch([task, self.restore_feed_scroll()])
+        Task::batch([
+            task,
+            self.restore_feed_scroll(),
+            self.load_navigation_avatars(),
+        ])
     }
 
     pub(super) fn open_community(&mut self, id: CommunityId) -> Task<Message> {
@@ -118,8 +129,39 @@ impl App {
         if reset_scroll {
             self.feed_offset = 0.0;
         }
+        let received_results = matches!(
+            message,
+            feed::Message::Loaded(..)
+                | feed::Message::SearchLoaded(..)
+                | feed::Message::ProfileLoaded(..)
+                | feed::Message::SavedCommentsLoaded(..)
+        );
+        let previous_count = self.feed.posts.len();
         let (task, selected) = self.feed.update(message);
-        let task = task.map(Message::Feed).map(cosmic::Action::App);
+        let thumbnails = self.media.request(
+            self.feed
+                .posts
+                .iter()
+                .skip(previous_count)
+                .filter_map(|post| {
+                    (!post.community.nsfw)
+                        .then(|| media::thumbnail(&post.post))
+                        .flatten()
+                        .map(str::to_owned)
+                }),
+            media::Size::Thumbnail,
+        );
+        let avatars = if received_results {
+            self.media
+                .request(self.feed.avatar_urls(), media::Size::Avatar)
+        } else {
+            cosmic::iced::Task::none()
+        };
+        let task = Task::batch([
+            task.map(Message::Feed).map(cosmic::Action::App),
+            thumbnails.map(Message::Media).map(cosmic::Action::App),
+            avatars.map(Message::Media).map(cosmic::Action::App),
+        ]);
         if let Some((post, comment)) = selected.filter(|_| self.destination == Destination::Feed)
             && (comment.is_some()
                 || self
@@ -146,12 +188,22 @@ impl App {
         {
             return Task::none();
         }
+        let received_notices = matches!(message, inbox::Message::Loaded(..));
         let unread = self.inbox.unread;
         let (task, selected) = self.inbox.update(message);
         if self.inbox.unread != unread {
             self.rebuild_nav();
         }
-        let task = task.map(Message::Inbox).map(cosmic::Action::App);
+        let avatars = if received_notices {
+            self.media
+                .request(self.inbox.avatar_urls(), media::Size::Avatar)
+        } else {
+            cosmic::iced::Task::none()
+        };
+        let task = Task::batch([
+            task.map(Message::Inbox).map(cosmic::Action::App),
+            avatars.map(Message::Media).map(cosmic::Action::App),
+        ]);
         if let Some((post, comment)) = selected.filter(|_| self.destination == Destination::Inbox) {
             Task::batch([task, self.open_post(post, Some(comment))])
         } else {
@@ -176,6 +228,7 @@ impl App {
         };
         Task::batch([
             load.map(Message::Post).map(cosmic::Action::App),
+            self.load_discussion_images(),
             operation::scroll_to(
                 post::SCROLL_ID,
                 operation::AbsoluteOffset {
@@ -184,6 +237,17 @@ impl App {
                 },
             ),
         ])
+    }
+
+    fn load_discussion_images(&mut self) -> Task<Message> {
+        cosmic::iced::Task::batch([
+            self.media
+                .request(self.post.image_urls(), media::Size::Preview),
+            self.media
+                .request(self.post.avatar_urls(), media::Size::Avatar),
+        ])
+        .map(Message::Media)
+        .map(cosmic::Action::App)
     }
 
     pub(super) fn update_post(&mut self, message: post::Message) -> Task<Message> {
@@ -204,6 +268,11 @@ impl App {
                     self.restore_feed_scroll()
                 }
             }
+            post::Message::OpenImage(url) => self
+                .media
+                .update(media::Message::Open(url))
+                .map(Message::Media)
+                .map(cosmic::Action::App),
             post::Message::OpenCommunity(id) => self.open_community(id),
             post::Message::OpenPerson(id) => {
                 self.navigate_feed(feed::Message::Scope(feed::Scope::Profile(id)))
@@ -239,14 +308,15 @@ impl App {
                 if let Some(id) = self.post.finish_comment(generation, result) {
                     self.feed.comment_added(id);
                 }
-                if edited_saved_comment {
+                let reload = if edited_saved_comment {
                     self.feed
                         .saved_comments_changed()
                         .map(Message::Feed)
                         .map(cosmic::Action::App)
                 } else {
                     Task::none()
-                }
+                };
+                Task::batch([reload, self.load_discussion_images()])
             }
             post::Message::ActionFinished(generation, result) => {
                 if let Some(updated) = self.post.finish_action(generation, result) {
@@ -257,6 +327,14 @@ impl App {
                 } else {
                     Task::none()
                 }
+            }
+            message @ (post::Message::Loaded(..) | post::Message::FocusLoaded(..)) => {
+                let task = self
+                    .post
+                    .update(message)
+                    .map(Message::Post)
+                    .map(cosmic::Action::App);
+                Task::batch([task, self.load_discussion_images()])
             }
             message => self
                 .post
@@ -274,6 +352,28 @@ impl App {
                 y: Some(self.feed_offset),
             },
         )
+    }
+
+    pub(super) fn navigation_communities(
+        &self,
+    ) -> impl Iterator<Item = &lemmy_api_common::lemmy_db_schema::source::community::Community>
+    {
+        self.accounts
+            .follows()
+            .iter()
+            .chain(self.community_scope.iter())
+    }
+
+    pub(super) fn load_navigation_avatars(&mut self) -> Task<Message> {
+        let urls: Vec<_> = self
+            .navigation_communities()
+            .filter_map(|community| community.icon.as_ref().map(|url| url.to_string()))
+            .chain(self.accounts.avatars().map(str::to_owned))
+            .collect();
+        self.media
+            .request(urls, media::Size::Avatar)
+            .map(Message::Media)
+            .map(cosmic::Action::App)
     }
 
     pub(super) fn rebuild_nav(&mut self) {
@@ -330,9 +430,14 @@ impl App {
             let item = feed::Scope::Community(community.id);
             let entry = nav
                 .insert()
-                .text(format!("!{}", community_handle(community)))
-                .icon(icon::from_name("system-users-symbolic"))
+                .text(community_title(community).to_owned())
+                .icon(self.media.community_avatar(community).icon())
                 .data(NavItem::Feed(item));
+            let entry = if let Some(host) = community.actor_id.host_str() {
+                entry.data(host.to_owned())
+            } else {
+                entry
+            };
             let entry = if index == 0 {
                 entry.divider_above(true)
             } else {

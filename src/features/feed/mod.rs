@@ -120,6 +120,7 @@ impl SearchKind {
 
 #[derive(Clone, Debug)]
 pub enum Message {
+    ToggleDensity,
     Refresh,
     More,
     Sort(usize),
@@ -541,6 +542,33 @@ impl Feed {
             .iter()
             .map(|view| &view.community)
             .find(|community| community.id == id)
+    }
+
+    pub fn avatar_urls(&self) -> impl Iterator<Item = String> + '_ {
+        self.posts
+            .iter()
+            .filter_map(|post| post.community.icon.as_ref())
+            .chain(
+                self.comments
+                    .iter()
+                    .filter_map(|comment| comment.creator.avatar.as_ref()),
+            )
+            .chain(
+                self.communities
+                    .iter()
+                    .filter_map(|item| item.community.icon.as_ref()),
+            )
+            .chain(
+                self.people
+                    .iter()
+                    .filter_map(|item| item.person.avatar.as_ref()),
+            )
+            .chain(
+                self.profile
+                    .iter()
+                    .filter_map(|person| person.avatar.as_ref()),
+            )
+            .map(ToString::to_string)
     }
 
     pub fn profile(&self) -> Option<&Person> {

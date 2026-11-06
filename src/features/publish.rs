@@ -1,5 +1,8 @@
 //! Text and link post composer.
-use crate::shared::{api::Api, presentation::community_handle};
+use crate::shared::{
+    api::Api,
+    presentation::{community_handle, community_label},
+};
 use cosmic::{
     Element,
     iced::{Length, Task},
@@ -127,8 +130,10 @@ impl Publish {
         let manual = if follows.is_empty() {
             true
         } else {
-            let mut choices: Vec<_> = follows.iter().map(community_handle).collect();
-            let selected = choices.iter().position(|name| name == &self.community);
+            let mut choices: Vec<_> = follows.iter().map(community_label).collect();
+            let selected = follows
+                .iter()
+                .position(|community| community_handle(community) == self.community);
             let manual =
                 self.manual_community || (!self.community.is_empty() && selected.is_none());
             let selected = if manual {
