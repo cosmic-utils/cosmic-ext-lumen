@@ -1,5 +1,5 @@
 mod storage;
-use crate::shared::{api::Api, media::Media};
+use crate::shared::{api::Api, cache::Cache, media::Media};
 use cosmic::{
     Element,
     iced::{Length, Task},
@@ -212,6 +212,7 @@ impl Accounts {
                         follows,
                         person_id,
                     }) => {
+                        let api = api.with_account_cache(&account.id);
                         self.session = Some(api.clone());
                         self.follows = follows;
                         self.person_id = Some(person_id);
@@ -244,7 +245,7 @@ impl Accounts {
                     return (
                         Task::perform(
                             async move {
-                                let warning = if let Some(api) = session {
+                                let warning = if let Some(api) = &session {
                                     api.post::<_, lemmy_api_common::SuccessResponse>("user/logout", &serde_json::json!({})).await.err().map(|_| "Removed locally; server session could not be revoked. Revoke it from Lemmy settings.".to_owned())
                                 } else {
                                     None
@@ -252,6 +253,15 @@ impl Accounts {
                                 tokio::task::spawn_blocking(move || storage::delete_token(&id))
                                     .await
                                     .map_err(|_| "Credential worker failed".to_string())??;
+                                if let Some(api) = session {
+                                    api.invalidate_reading_cache().await;
+                                    if let Some(scope) = api.reading_scope() {
+                                        let _ = tokio::task::spawn_blocking(move || {
+                                            Cache::Navigation.invalidate(&scope)
+                                        })
+                                        .await;
+                                    }
+                                }
                                 Ok(warning)
                             },
                             Message::Removed,
@@ -288,12 +298,16 @@ impl Accounts {
             .or_else(|| previous.map(Api::into_anonymous))
     }
 
-    pub fn active(&self) -> Option<&Account> {
-        self.session.as_ref()?;
+    pub fn remembered_active(&self) -> Option<&Account> {
         self.registry
             .accounts
             .iter()
             .find(|account| Some(&account.id) == self.registry.active.as_ref())
+    }
+
+    pub fn active(&self) -> Option<&Account> {
+        self.session.as_ref()?;
+        self.remembered_active()
     }
 
     pub fn person_id(&self) -> Option<PersonId> {

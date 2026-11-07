@@ -2,6 +2,9 @@
 mod navigation;
 mod view;
 
+use crate::shared::api::Api;
+use navigation::CachedNavigation;
+
 use crate::{
     features::{accounts, community, feed, inbox, instance, post, publish},
     shared::{links::open_web_link, media},
@@ -62,6 +65,7 @@ pub struct App {
     inbox: inbox::Inbox,
     publish: publish::Publish,
     nav: nav_bar::Model,
+    startup_navigation: Option<CachedNavigation>,
     destination: Destination,
     community_scope: Option<Community>,
     drawer: Drawer,
@@ -79,6 +83,7 @@ pub struct App {
 #[derive(Clone, Debug)]
 pub enum Message {
     Accounts(accounts::Message),
+    CachedNavigation(CachedNavigation),
     Instance(instance::Message),
     Feed(feed::Message),
     Post(post::Message),
@@ -124,6 +129,7 @@ impl cosmic::Application for App {
             inbox: inbox::Inbox::default(),
             publish: publish::Publish::default(),
             nav: nav_bar::Model::default(),
+            startup_navigation: None,
             destination: Destination::Feed,
             community_scope: None,
             drawer: Drawer::Closed,
@@ -148,13 +154,26 @@ impl cosmic::Application for App {
             .core
             .main_window_id()
             .map_or_else(Task::none, |id| app.set_window_title("Lemmy".into(), id));
+        let preview = app
+            .accounts
+            .remembered_active()
+            .map_or_else(Task::none, |account| {
+                let feed = app
+                    .feed
+                    .preview_startup(&account.instance, &account.id)
+                    .map(Message::Feed)
+                    .map(cosmic::Action::App);
+                let navigation = Api::account_cache_scope(&account.instance, &account.id)
+                    .map_or_else(Task::none, CachedNavigation::load);
+                Task::batch([feed, navigation])
+            });
         let restore = app
             .accounts
             .restore()
             .map(Message::Accounts)
             .map(cosmic::Action::App);
         let avatars = app.load_navigation_avatars();
-        (app, Task::batch([title, restore, avatars]))
+        (app, Task::batch([title, preview.chain(restore), avatars]))
     }
 
     fn nav_bar(&self) -> Option<cosmic::Element<'_, cosmic::Action<Message>>> {
@@ -166,6 +185,9 @@ impl cosmic::Application for App {
     }
 
     fn on_nav_select(&mut self, id: nav_bar::Id) -> Task<Message> {
+        if self.accounts.busy && self.feed.api().is_none() {
+            return Task::none();
+        }
         match self.nav.data::<NavItem>(id).copied() {
             Some(NavItem::Feed(feed::Scope::Community(id))) => self.open_community(id),
             Some(NavItem::Feed(scope)) => self.navigate_feed(feed::Message::Scope(scope)),
@@ -253,12 +275,26 @@ impl cosmic::Application for App {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::CachedNavigation(cached) => {
+                if self.accounts.busy && self.feed.api().is_none() {
+                    self.startup_navigation = Some(cached);
+                    self.rebuild_nav();
+                    return self.load_navigation_avatars();
+                }
+                Task::none()
+            }
             Message::Accounts(message) => {
                 let (task, session) = self.accounts.update(message, &self.instance.input);
                 let task = task.map(Message::Accounts).map(cosmic::Action::App);
                 if let Some(api) = session {
                     Task::batch([task, self.connect(api)])
                 } else {
+                    if !self.accounts.busy {
+                        self.feed.discard_startup_preview();
+                        if self.startup_navigation.take().is_some() {
+                            self.rebuild_nav();
+                        }
+                    }
                     task
                 }
             }
@@ -420,11 +456,16 @@ impl cosmic::Application for App {
                             details.result = Some(Ok(view));
                         }
                         self.rebuild_nav();
-                        if self.destination == Destination::Feed
+                        let cache = self.cache_navigation_follows();
+                        let avatars = self.load_navigation_avatars();
+                        let feed = if self.destination == Destination::Feed
                             && self.feed.scope() == feed::Scope::Subscribed
                         {
-                            return self.update_feed(feed::Message::Refresh);
-                        }
+                            self.update_feed(feed::Message::Refresh)
+                        } else {
+                            Task::none()
+                        };
+                        return Task::batch([cache, avatars, feed]);
                     }
                     Err(error) => {
                         if let Drawer::Community(details) = &mut self.drawer

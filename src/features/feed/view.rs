@@ -154,7 +154,7 @@ impl Feed {
                     space.space_xs
                 },
                 selected == Some(post.post.id),
-                Some(Message::Open(post.post.id.0)),
+                self.api.is_some().then_some(Message::Open(post.post.id.0)),
             ));
         }
         for comment in &self.comments {

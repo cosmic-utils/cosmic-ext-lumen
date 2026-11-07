@@ -1,4 +1,5 @@
 //! Image downloads and the in-memory cache shared by feeds and discussions.
+use super::cache::{self, Cache};
 use cosmic::{
     Element,
     iced::{ContentFit, Length, Task},
@@ -10,9 +11,11 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     io::Cursor,
     sync::Arc,
+    time::Duration,
 };
 use url::Url;
 
+const IMAGE_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const DOWNLOAD_LIMIT: usize = 12 * 1024 * 1024;
 const CACHE_LIMIT: usize = 48 * 1024 * 1024;
 const CACHE_ENTRIES: usize = 512;
@@ -297,6 +300,18 @@ pub fn web_url(value: &str) -> bool {
 }
 
 async fn download(http: reqwest::Client, url: &str, size: Size) -> Option<Picture> {
+    let key = cache::key(url);
+    let cached_key = key.clone();
+    let cached = tokio::task::spawn_blocking(move || {
+        let bytes = Cache::Images.read(&cached_key, IMAGE_MAX_AGE)?;
+        decode(&bytes, size)
+    })
+    .await
+    .ok()
+    .flatten();
+    if cached.is_some() {
+        return cached;
+    }
     let mut response = http.get(url).send().await.ok()?.error_for_status().ok()?;
     if response
         .content_length()
@@ -311,12 +326,16 @@ async fn download(http: reqwest::Client, url: &str, size: Size) -> Option<Pictur
         }
         bytes.extend_from_slice(&chunk);
     }
-    tokio::task::spawn_blocking(move || decode(bytes, size))
-        .await
-        .ok()?
+    tokio::task::spawn_blocking(move || {
+        let image = decode(&bytes, size)?;
+        Cache::Images.write(&key, &bytes);
+        Some(image)
+    })
+    .await
+    .ok()?
 }
 
-fn decode(bytes: Vec<u8>, size: Size) -> Option<Picture> {
+fn decode(bytes: &[u8], size: Size) -> Option<Picture> {
     let mut reader = ::image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .ok()?;
@@ -348,6 +367,22 @@ fn decode(bytes: Vec<u8>, size: Size) -> Option<Picture> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn can_open_a_cached_image_without_its_server() {
+        let mut png = Cursor::new(Vec::new());
+        ::image::DynamicImage::new_rgba8(8, 8)
+            .write_to(&mut png, ::image::ImageFormat::Png)
+            .unwrap();
+        let url = format!("http://127.0.0.1:1/{}.png", uuid::Uuid::new_v4());
+        let key = cache::key(url.as_str());
+        Cache::Images.write(&key, &png.into_inner());
+        let image = download(reqwest::Client::new(), &url, Size::Thumbnail)
+            .await
+            .unwrap();
+        assert_eq!(image.bytes, 8 * 8 * 4);
+        Cache::Images.invalidate(&key);
+    }
+
     #[test]
     fn decodes_and_bounds_image_dimensions() {
         let mut png = Cursor::new(Vec::new());
@@ -356,9 +391,9 @@ mod tests {
             .unwrap();
         let original = png.into_inner();
 
-        let thumb = decode(original.clone(), Size::Thumbnail).unwrap();
+        let thumb = decode(&original, Size::Thumbnail).unwrap();
         assert_eq!(thumb.bytes, 256 * 128 * 4);
-        let avatar = decode(original.clone(), Size::Avatar).unwrap();
+        let avatar = decode(&original, Size::Avatar).unwrap();
         assert!(matches!(
             avatar.handle,
             Handle::Rgba {
@@ -367,9 +402,9 @@ mod tests {
                 ..
             }
         ));
-        let preview = decode(original, Size::Preview).unwrap();
+        let preview = decode(&original, Size::Preview).unwrap();
         assert_eq!(preview.bytes, 512 * 256 * 4);
-        assert!(decode(b"<html>Not an image</html>".to_vec(), Size::Preview).is_none());
+        assert!(decode(b"<html>Not an image</html>", Size::Preview).is_none());
     }
 
     #[test]

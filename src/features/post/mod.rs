@@ -7,7 +7,11 @@ pub(crate) use view::render_markdown;
 
 pub const SCROLL_ID: &str = "lemmy-discussion";
 
-use crate::shared::{api::Api, links::open_web_link, media};
+use crate::shared::{
+    api::{Api, Freshness},
+    links::open_web_link,
+    media,
+};
 use cosmic::{
     iced::{Task, clipboard, widget::operation},
     widget::{markdown, text_editor},
@@ -163,7 +167,7 @@ impl Post {
         self.api = Some(api);
         self.set_selected(post);
         self.page = 1;
-        self.load()
+        self.load(Freshness::Cached)
     }
 
     pub fn avatar_urls(&self) -> impl Iterator<Item = String> + '_ {
@@ -673,7 +677,7 @@ impl Post {
         }
     }
 
-    fn load(&mut self) -> Task<Message> {
+    fn load(&mut self, freshness: Freshness) -> Task<Message> {
         let (Some(api), Some(post)) = (self.api.clone(), &self.selected) else {
             return Task::none();
         };
@@ -681,7 +685,13 @@ impl Post {
         self.error = None;
         let generation = self.generation;
         Task::perform(
-            service::comments(api, post.post.id, self.page, COMMENT_SORTS[self.sort]),
+            service::comments(
+                api,
+                post.post.id,
+                self.page,
+                COMMENT_SORTS[self.sort],
+                freshness,
+            ),
             move |result| Message::Loaded(generation, result),
         )
     }
@@ -770,7 +780,7 @@ impl Post {
                     .retain(|comment| Some(comment.data.comment.id) == self.focused_comment);
                 self.page = 1;
                 self.more = false;
-                return self.load();
+                return self.load(Freshness::Cached);
             }
             Message::ToggleComposer if self.submitting.is_none() => {
                 self.composer_open = !self.composer_open;
@@ -807,8 +817,8 @@ impl Post {
             Message::SubmitComment(generation, target) => {
                 return self.submit_comment(generation, target);
             }
-            Message::More if !self.busy && self.more => return self.load(),
-            Message::Retry if !self.busy => return self.load(),
+            Message::More if !self.busy && self.more => return self.load(Freshness::Cached),
+            Message::Retry if !self.busy => return self.load(Freshness::Refresh),
             Message::Collapse(id) => {
                 if !self.collapsed.remove(&id) {
                     self.collapsed.insert(id);

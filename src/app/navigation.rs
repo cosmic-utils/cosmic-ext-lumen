@@ -1,7 +1,7 @@
 use super::{App, Destination, Drawer, Message, NavItem};
 use crate::{
     features::{feed, inbox, post, publish},
-    shared::{api::Api, media, presentation::community_title},
+    shared::{api::Api, cache::Cache, media, presentation::community_title},
 };
 use cosmic::{
     ApplicationExt,
@@ -10,9 +10,64 @@ use cosmic::{
     widget::{icon, nav_bar},
 };
 use lemmy_api_common::{
-    lemmy_db_schema::newtypes::{CommentId, CommunityId},
+    lemmy_db_schema::{
+        newtypes::{CommentId, CommunityId},
+        source::community::Community,
+    },
     lemmy_db_views::structs::PostView,
 };
+
+const NAVIGATION_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 60 * 60);
+
+#[derive(Clone, Debug)]
+pub struct CachedNavigation {
+    scope: String,
+    follows: Vec<Community>,
+    unread: i64,
+}
+
+impl CachedNavigation {
+    pub(super) fn load(scope: String) -> Task<Message> {
+        cosmic::iced::Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let follows = Cache::Navigation
+                        .read(&format!("{scope}follows"), NAVIGATION_MAX_AGE)
+                        .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+                    let unread = Cache::Navigation
+                        .read(&format!("{scope}unread"), NAVIGATION_MAX_AGE)
+                        .and_then(|bytes| serde_json::from_slice::<i64>(&bytes).ok());
+                    if follows.is_none() && unread.is_none() {
+                        return None;
+                    }
+                    Some(Self {
+                        scope,
+                        follows: follows.unwrap_or_default(),
+                        unread: unread.unwrap_or_default().max(0),
+                    })
+                })
+                .await
+                .ok()
+                .flatten()
+            },
+            |snapshot| snapshot,
+        )
+        .and_then(cosmic::iced::Task::done)
+        .map(Message::CachedNavigation)
+        .map(cosmic::Action::App)
+    }
+}
+
+fn save_navigation(api: &Api, part: &str, value: &impl serde::Serialize) -> Task<Message> {
+    let (Some(scope), Ok(bytes)) = (api.reading_scope(), serde_json::to_vec(value)) else {
+        return Task::none();
+    };
+    let key = format!("{scope}{part}");
+    cosmic::iced::Task::future(async move {
+        let _ = tokio::task::spawn_blocking(move || Cache::Navigation.write(&key, &bytes)).await;
+    })
+    .discard()
+}
 
 impl App {
     pub(super) fn can_split(&self) -> bool {
@@ -52,13 +107,26 @@ impl App {
         self.community_scope = None;
         self.search.clear();
         self.focused = false;
-        self.feed_offset = 0.0;
+        if !self.feed.has_startup_preview() {
+            self.feed_offset = 0.0;
+        }
         self.close_drawer();
+        let unread = self
+            .startup_navigation
+            .take()
+            .filter(|cached| api.reading_scope().as_deref() == Some(&cached.scope))
+            .map_or(0, |cached| cached.unread);
+        let cache_navigation = if api.is_authenticated() {
+            save_navigation(&api, "follows", &self.accounts.follows())
+        } else {
+            Task::none()
+        };
         let inbox = self
             .inbox
             .connect(&api)
             .map(Message::Inbox)
             .map(cosmic::Action::App);
+        self.inbox.unread = unread;
         let feed = self
             .feed
             .connect(api)
@@ -68,6 +136,7 @@ impl App {
         Task::batch([
             feed,
             inbox,
+            cache_navigation,
             self.restore_feed_scroll(),
             self.load_navigation_avatars(),
         ])
@@ -131,18 +200,23 @@ impl App {
         }
         let received_results = matches!(
             message,
-            feed::Message::Loaded(..)
+            feed::Message::CachedFeed(..)
+                | feed::Message::Loaded(..)
                 | feed::Message::SearchLoaded(..)
                 | feed::Message::ProfileLoaded(..)
                 | feed::Message::SavedCommentsLoaded(..)
         );
-        let previous_count = self.feed.posts.len();
+        let skip_thumbnails = if matches!(message, feed::Message::Loaded(_, false, _)) {
+            0
+        } else {
+            self.feed.posts.len()
+        };
         let (task, selected) = self.feed.update(message);
         let thumbnails = self.media.request(
             self.feed
                 .posts
                 .iter()
-                .skip(previous_count)
+                .skip(skip_thumbnails)
                 .filter_map(|post| {
                     (!post.community.nsfw)
                         .then(|| media::thumbnail(&post.post))
@@ -189,11 +263,23 @@ impl App {
             return Task::none();
         }
         let received_notices = matches!(message, inbox::Message::Loaded(..));
+        let confirmed_count = self.inbox.is_current_unread_response(&message);
         let unread = self.inbox.unread;
         let (task, selected) = self.inbox.update(message);
-        if self.inbox.unread != unread {
+        let unread_changed = self.inbox.unread != unread;
+        if unread_changed {
             self.rebuild_nav();
         }
+        let cache = if confirmed_count || unread_changed {
+            self.feed
+                .api()
+                .filter(Api::is_authenticated)
+                .map_or_else(Task::none, |api| {
+                    save_navigation(&api, "unread", &self.inbox.unread)
+                })
+        } else {
+            Task::none()
+        };
         let avatars = if received_notices {
             self.media
                 .request(self.inbox.avatar_urls(), media::Size::Avatar)
@@ -202,6 +288,7 @@ impl App {
         };
         let task = Task::batch([
             task.map(Message::Inbox).map(cosmic::Action::App),
+            cache,
             avatars.map(Message::Media).map(cosmic::Action::App),
         ]);
         if let Some((post, comment)) = selected.filter(|_| self.destination == Destination::Inbox) {
@@ -354,14 +441,25 @@ impl App {
         )
     }
 
-    pub(super) fn navigation_communities(
-        &self,
-    ) -> impl Iterator<Item = &lemmy_api_common::lemmy_db_schema::source::community::Community>
-    {
-        self.accounts
-            .follows()
+    fn navigation_follows(&self) -> &[Community] {
+        self.startup_navigation
+            .as_ref()
+            .map_or_else(|| self.accounts.follows(), |cached| &cached.follows)
+    }
+
+    pub(super) fn navigation_communities(&self) -> impl Iterator<Item = &Community> {
+        self.navigation_follows()
             .iter()
             .chain(self.community_scope.iter())
+    }
+
+    pub(super) fn cache_navigation_follows(&self) -> Task<Message> {
+        self.feed
+            .api()
+            .filter(Api::is_authenticated)
+            .map_or_else(Task::none, |api| {
+                save_navigation(&api, "follows", &self.accounts.follows())
+            })
     }
 
     pub(super) fn load_navigation_avatars(&mut self) -> Task<Message> {
@@ -379,15 +477,14 @@ impl App {
     pub(super) fn rebuild_nav(&mut self) {
         let mut nav = nav_bar::Model::default();
         let scope = self.feed.scope();
+        let signed_in = self.feed.signed_in() || self.startup_navigation.is_some();
         for (item, text, image) in [
             (feed::Scope::All, "All posts", "network-workgroup-symbolic"),
             (feed::Scope::Local, "Local", "network-server-symbolic"),
             (feed::Scope::Subscribed, "Subscribed", "view-list-symbolic"),
             (feed::Scope::Saved, "Saved", "user-bookmarks-symbolic"),
         ] {
-            if !self.feed.signed_in()
-                && matches!(item, feed::Scope::Subscribed | feed::Scope::Saved)
-            {
+            if !signed_in && matches!(item, feed::Scope::Subscribed | feed::Scope::Saved) {
                 continue;
             }
             let entry = nav
@@ -404,9 +501,13 @@ impl App {
                 entry.activate();
             }
         }
-        if self.feed.signed_in() {
-            let title = if self.inbox.unread > 0 {
-                format!("Inbox ({})", self.inbox.unread)
+        if signed_in {
+            let unread = self
+                .startup_navigation
+                .as_ref()
+                .map_or(self.inbox.unread, |cached| cached.unread);
+            let title = if unread > 0 {
+                format!("Inbox ({unread})")
             } else {
                 "Inbox".into()
             };
@@ -419,7 +520,7 @@ impl App {
                 entry.activate();
             }
         }
-        let mut communities: Vec<_> = self.accounts.follows().iter().collect();
+        let mut communities: Vec<_> = self.navigation_follows().iter().collect();
         if let Some(community) = &self.community_scope
             && !communities.iter().any(|item| item.id == community.id)
         {
@@ -448,5 +549,41 @@ impl App {
             }
         }
         self.nav = nav;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::features::post::tests::post_view;
+    use cosmic::iced::{futures::StreamExt, runtime};
+
+    #[tokio::test]
+    async fn navigation_preview_loads_communities_and_badge_for_one_account() {
+        let instance = "https://example.com";
+        let account = uuid::Uuid::new_v4().to_string();
+        let scope = Api::account_cache_scope(instance, &account).unwrap();
+        let community = post_view().community;
+        Cache::Navigation.write(
+            &format!("{scope}follows"),
+            &serde_json::to_vec(&[&community]).unwrap(),
+        );
+        Cache::Navigation.write(&format!("{scope}unread"), b"3");
+
+        let mut preview =
+            runtime::task::into_stream(CachedNavigation::load(scope.clone())).unwrap();
+        let Some(runtime::Action::Output(cosmic::Action::App(Message::CachedNavigation(cached)))) =
+            preview.next().await
+        else {
+            panic!("expected cached navigation");
+        };
+        assert_eq!(cached.scope, scope);
+        assert_eq!(cached.follows[0].id, community.id);
+        assert_eq!(cached.unread, 3);
+
+        let other = Api::account_cache_scope(instance, &format!("{account}-other")).unwrap();
+        let mut preview = runtime::task::into_stream(CachedNavigation::load(other)).unwrap();
+        assert!(preview.next().await.is_none());
+        Cache::Navigation.invalidate(&scope);
     }
 }

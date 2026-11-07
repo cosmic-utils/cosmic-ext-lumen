@@ -85,6 +85,11 @@ impl Inbox {
         self.refresh_unread()
     }
 
+    pub fn is_current_unread_response(&self, message: &Message) -> bool {
+        matches!(message, Message::Unread(generation, request, Ok(_))
+            if *generation == self.generation && *request == self.unread_request)
+    }
+
     fn refresh_unread(&mut self) -> Task<Message> {
         let Some(api) = self.api.clone() else {
             return Task::none();

@@ -5,7 +5,10 @@ pub use view::SCROLL_ID;
 
 use std::sync::Arc;
 
-use crate::{features::post, shared::api::Api};
+use crate::{
+    features::post,
+    shared::api::{Api, Freshness},
+};
 use cosmic::{iced::Task, widget::markdown};
 use lemmy_api_common::{
     lemmy_db_schema::{
@@ -79,6 +82,7 @@ pub struct Feed {
     cursor: Option<PaginationCursor>,
     generation: u64,
     api: Option<Api>,
+    startup_scope: Option<String>,
     query: String,
     resolve_reference: bool,
     search_type: SearchKind,
@@ -142,11 +146,42 @@ pub enum Message {
     CommentOpened(u64, CommentId, Result<Box<PostView>, String>),
     SavedCommentsLoaded(u64, Result<Vec<CommentView>, String>),
     Scrolled(f32),
+    CachedFeed(u64, GetPostsResponse),
     Loaded(u64, bool, Result<GetPostsResponse, String>),
     SearchLoaded(u64, bool, Result<SearchResponse, String>),
 }
 
 impl Feed {
+    pub fn preview_startup(&mut self, instance: &str, account: &str) -> Task<Message> {
+        let Some(scope) = Api::account_cache_scope(instance, account) else {
+            return Task::none();
+        };
+        self.startup_scope = Some(scope.clone());
+        self.cached_first_page(scope)
+    }
+
+    pub fn has_startup_preview(&self) -> bool {
+        self.startup_scope.is_some() && self.loaded
+    }
+
+    pub fn discard_startup_preview(&mut self) {
+        if self.startup_scope.take().is_some() {
+            self.generation += 1;
+            self.posts.clear();
+            self.cursor = None;
+            self.loaded = false;
+        }
+    }
+
+    fn cached_first_page(&self, cache_scope: String) -> Task<Message> {
+        let generation = self.generation;
+        Task::perform(
+            service::cached_initial_feed(cache_scope, self.sort, self.scope),
+            move |cached| cached.map(|response| Message::CachedFeed(generation, response)),
+        )
+        .and_then(Task::done)
+    }
+
     pub fn connect(&mut self, api: Api) -> Task<Message> {
         if matches!(
             self.scope,
@@ -155,6 +190,11 @@ impl Feed {
         {
             self.scope = Scope::All;
         }
+        let scope = api.reading_scope();
+        let keep_preview = self
+            .startup_scope
+            .take()
+            .is_some_and(|preview_scope| scope.as_ref() == Some(&preview_scope) && self.loaded);
         self.api = Some(api);
         self.show_saved_comments = false;
         self.profile = None;
@@ -162,7 +202,14 @@ impl Feed {
         self.search_type = SearchKind::Posts;
         self.search_community = None;
         self.search_communities.clear();
-        self.reload()
+        if keep_preview {
+            self.generation += 1;
+            return self.request(false, Freshness::Refresh);
+        }
+        let load = self.reload_with(Freshness::Refresh);
+        scope
+            .map_or_else(Task::none, |scope| self.cached_first_page(scope))
+            .chain(load)
     }
 
     pub fn scope(&self) -> Scope {
@@ -174,6 +221,10 @@ impl Feed {
     }
 
     fn reload(&mut self) -> Task<Message> {
+        self.reload_with(Freshness::Cached)
+    }
+
+    fn reload_with(&mut self, freshness: Freshness) -> Task<Message> {
         self.generation += 1;
         self.posts.clear();
         self.comments.clear();
@@ -185,10 +236,10 @@ impl Feed {
         self.page = 1;
         self.page_more = false;
         self.loaded = false;
-        self.request(false)
+        self.request(false, freshness)
     }
 
-    fn request(&mut self, append: bool) -> Task<Message> {
+    fn request(&mut self, append: bool, freshness: Freshness) -> Task<Message> {
         let Some(api) = self.api.clone() else {
             return Task::none();
         };
@@ -196,13 +247,14 @@ impl Feed {
         self.error = None;
         let generation = self.generation;
         if self.viewing_saved_comments() {
-            return Task::perform(service::saved_comments(api, self.page), move |result| {
-                Message::SavedCommentsLoaded(generation, result)
-            });
+            return Task::perform(
+                service::saved_comments(api, self.page, freshness),
+                move |result| Message::SavedCommentsLoaded(generation, result),
+            );
         }
         if let Scope::Profile(id) = self.scope {
             return Task::perform(
-                service::profile(api, id, self.sort, self.page),
+                service::profile(api, id, self.sort, self.page, freshness),
                 move |result| Message::ProfileLoaded(generation, append, result.map(Box::new)),
             );
         }
@@ -232,13 +284,14 @@ impl Feed {
                         limit: Some(service::PAGE_SIZE),
                         ..Default::default()
                     },
+                    freshness,
                 ),
                 move |result| Message::SearchLoaded(generation, append, result),
             );
         }
         let cursor = if append { self.cursor.clone() } else { None };
         Task::perform(
-            service::load(api, self.sort, self.scope, cursor),
+            service::load(api, self.sort, self.scope, cursor, freshness),
             move |result| Message::Loaded(generation, append, result),
         )
     }
@@ -248,11 +301,11 @@ impl Feed {
         message: Message,
     ) -> (Task<Message>, Option<(PostView, Option<CommentId>)>) {
         match message {
-            Message::Refresh => return (self.reload(), None),
+            Message::Refresh => return (self.reload_with(Freshness::Refresh), None),
             Message::More if !self.busy && self.has_more() => {
-                return (self.request(true), None);
+                return (self.request(true, Freshness::Cached), None);
             }
-            Message::Sort(index) => {
+            Message::Sort(index) if self.api.is_some() => {
                 self.sort = Sort::from_index(index);
                 return (self.reload(), None);
             }
@@ -403,12 +456,20 @@ impl Feed {
                         .map(|post| (post, None)),
                 );
             }
+            Message::CachedFeed(generation, response) if generation == self.generation => {
+                self.cursor = response.next_page;
+                self.apply_posts(response.posts, false);
+            }
             Message::Loaded(generation, append, result) if generation == self.generation => {
                 self.busy = false;
                 match result {
                     Ok(response) => {
                         self.cursor = response.next_page;
-                        self.apply_posts(response.posts, append);
+                        if append || self.posts != response.posts {
+                            self.apply_posts(response.posts, append);
+                        } else {
+                            self.loaded = true;
+                        }
                     }
                     Err(error) => self.error = Some(error),
                 }
@@ -666,6 +727,39 @@ mod tests {
             panic!("feed request did not finish");
         };
         message
+    }
+
+    #[tokio::test]
+    async fn keeps_startup_snapshot_visible_until_the_live_feed_arrives() {
+        let mut cached = post_view();
+        cached.post.name = "Cached title".into();
+        let mut fresh = cached.clone();
+        fresh.post.name = "Fresh title".into();
+        let response = json!({"posts": [fresh]}).to_string();
+        let (api, request) = serve("200 OK", &response).await;
+
+        let mut feed = Feed::default();
+        let _ = feed.preview_startup(api.base.as_str(), "reader");
+        let _ = feed.update(Message::CachedFeed(
+            feed.generation,
+            GetPostsResponse {
+                posts: vec![cached.clone()],
+                next_page: None,
+            },
+        ));
+        assert!(feed.has_startup_preview());
+        assert!(feed.api().is_none());
+
+        let live = feed.connect(
+            api.authenticated("token".into())
+                .with_account_cache("reader"),
+        );
+        assert_eq!(feed.posts, vec![cached]);
+        assert!(feed.busy);
+        let _ = feed.update(loaded(live).await);
+        assert_eq!(feed.posts, vec![fresh]);
+        assert!(!feed.busy);
+        assert!(request.await.unwrap().starts_with("GET /api/v3/post/list?"));
     }
 
     #[tokio::test]

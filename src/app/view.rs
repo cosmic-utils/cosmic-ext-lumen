@@ -128,7 +128,7 @@ impl App {
 
     pub(super) fn workspace(&self) -> Element<'_, Message> {
         let space = cosmic::theme::active().cosmic().spacing;
-        if self.feed.api().is_none() {
+        if self.feed.api().is_none() && !self.feed.has_startup_preview() {
             let mut welcome = widget::column::with_capacity(3)
                 .spacing(space.space_s)
                 .push(widget::text::title1("Lemmy"));

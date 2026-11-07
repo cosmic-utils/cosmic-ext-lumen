@@ -1,5 +1,5 @@
 use super::{Action, CommentAction, CommentTarget};
-use crate::shared::api::Api;
+use crate::shared::api::{Api, Freshness};
 use lemmy_api_common::{
     comment::{
         CommentResponse, CreateComment, CreateCommentLike, DeleteComment, EditComment, GetComment,
@@ -102,8 +102,9 @@ pub async fn comments(
     post: PostId,
     page: i64,
     sort: CommentSortType,
+    freshness: Freshness,
 ) -> Result<GetCommentsResponse, String> {
-    api.get(
+    api.get_cached(
         "comment/list",
         &GetComments {
             post_id: Some(post),
@@ -114,12 +115,15 @@ pub async fn comments(
             limit: Some(PAGE_SIZE as i64),
             ..Default::default()
         },
+        freshness,
     )
     .await
 }
 
 pub async fn get_comment(api: Api, id: CommentId, post: PostId) -> Result<CommentView, String> {
-    let response: CommentResponse = api.get("comment", &GetComment { id }).await?;
+    let response: CommentResponse = api
+        .get_cached("comment", &GetComment { id }, Freshness::Cached)
+        .await?;
     checked_comment(response, post, id)
 }
 
@@ -167,12 +171,13 @@ fn checked_comment(
 
 pub async fn get_post(api: &Api, id: PostId) -> Result<PostView, String> {
     let response: GetPostResponse = api
-        .get(
+        .get_cached(
             "post",
             &GetPost {
                 id: Some(id),
                 comment_id: None,
             },
+            Freshness::Cached,
         )
         .await?;
     if response.post_view.post.id != id {
