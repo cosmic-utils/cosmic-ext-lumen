@@ -1,14 +1,17 @@
 //! Image downloads and the in-memory cache shared by feeds and discussions.
-use super::cache::{self, Cache};
+use super::{
+    cache::{self, Cache},
+    local,
+};
 use cosmic::{
     Element,
-    iced::{ContentFit, Length, Task},
+    iced::{ContentFit, Length, Task, task},
     widget::{self, button, icon, image},
 };
 use image::{Handle, Image};
 use lemmy_api_common::lemmy_db_schema::source::{community::Community, person::Person, post::Post};
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     io::Cursor,
     sync::Arc,
     time::Duration,
@@ -46,51 +49,106 @@ pub struct Picture {
 
 #[derive(Clone, Debug)]
 pub enum Message {
-    Loaded(String, Size, Option<Picture>),
+    Loaded(String, Size, u64, Option<Picture>),
     Open(String),
     Close,
     ZoomIn,
     ZoomOut,
     ResetZoom,
+    Automatic(bool),
     OpenInBrowser(String),
+}
+
+struct Download {
+    id: u64,
+    automatic: bool,
+    abort: task::Handle,
 }
 
 pub struct Media {
     http: reqwest::Client,
     downloads: Arc<tokio::sync::Semaphore>,
-    pending: HashSet<(String, Size)>,
+    pending: HashMap<(String, Size), Download>,
+    next_download: u64,
     cache: HashMap<(String, Size), Option<Picture>>,
     order: VecDeque<(String, Size)>,
     bytes: usize,
     opened: Option<String>,
     zoom: usize,
+    automatic: bool,
+    preference_error: Option<String>,
 }
 
 impl Media {
     pub fn new(http: reqwest::Client) -> Self {
+        let preference =
+            local::config_path("media.json").and_then(|path| local::read::<bool>(&path));
         Self {
             http,
             downloads: Arc::new(tokio::sync::Semaphore::new(4)),
-            pending: HashSet::new(),
+            pending: HashMap::new(),
+            next_download: 0,
             cache: HashMap::new(),
             order: VecDeque::new(),
             bytes: 0,
             opened: None,
             zoom: 0,
+            automatic: preference
+                .as_ref()
+                .ok()
+                .and_then(|value| *value)
+                .unwrap_or(true),
+            preference_error: preference
+                .err()
+                .map(|error| format!("Could not load image settings: {error}")),
         }
     }
 
+    pub fn automatic(&self) -> bool {
+        self.automatic
+    }
+
+    pub fn preference_error(&self) -> Option<&str> {
+        self.preference_error.as_deref()
+    }
+
     pub fn request(&mut self, urls: impl IntoIterator<Item = String>, size: Size) -> Task<Message> {
+        if !self.automatic {
+            return Task::none();
+        }
+        self.request_images(urls, size, true)
+    }
+
+    pub fn request_preview(&mut self, url: String) -> Task<Message> {
+        self.request_images([url], Size::Preview, false)
+    }
+
+    pub fn preview_pending(&self, url: &str) -> bool {
+        self.pending.contains_key(&(url.to_owned(), Size::Preview))
+    }
+
+    fn request_images(
+        &mut self,
+        urls: impl IntoIterator<Item = String>,
+        size: Size,
+        automatic: bool,
+    ) -> Task<Message> {
         let tasks: Vec<_> = urls
             .into_iter()
             .filter_map(|url| {
                 let key = (url.clone(), size);
-                if self.cache.contains_key(&key) || !web_url(&url) || !self.pending.insert(key) {
+                if self.cache.contains_key(&key) || !web_url(&url) {
                     return None;
                 }
+                if let Some(pending) = self.pending.get_mut(&key) {
+                    pending.automatic &= automatic;
+                    return None;
+                }
+                self.next_download += 1;
+                let id = self.next_download;
                 let http = self.http.clone();
                 let downloads = self.downloads.clone();
-                Some(Task::perform(
+                let (task, abort) = Task::perform(
                     async move {
                         let picture = async {
                             let _permit = downloads.acquire().await.ok()?;
@@ -99,8 +157,18 @@ impl Media {
                         .await;
                         (url, picture)
                     },
-                    move |(url, picture)| Message::Loaded(url, size, picture),
-                ))
+                    move |(url, picture)| Message::Loaded(url, size, id, picture),
+                )
+                .abortable();
+                self.pending.insert(
+                    key,
+                    Download {
+                        id,
+                        automatic,
+                        abort,
+                    },
+                );
+                Some(task)
             })
             .collect();
         if tasks.is_empty() {
@@ -112,11 +180,16 @@ impl Media {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Loaded(url, size, picture) => {
+            Message::Loaded(url, size, id, picture) => {
                 let key = (url, size);
-                if !self.pending.remove(&key) {
+                if self
+                    .pending
+                    .get(&key)
+                    .is_none_or(|download| download.id != id)
+                {
                     return Task::none();
                 }
+                self.pending.remove(&key);
                 self.bytes += picture.as_ref().map_or(0, |picture| picture.bytes);
                 self.order.push_back(key.clone());
                 self.cache.insert(key, picture);
@@ -137,7 +210,22 @@ impl Media {
                     self.cache.remove(&key);
                     self.order.retain(|cached| cached != &key);
                 }
-                return self.request([url], Size::Preview);
+                return self.request_images([url], Size::Preview, false);
+            }
+            Message::Automatic(automatic) => {
+                self.automatic = automatic;
+                if !automatic {
+                    self.pending.retain(|_, download| {
+                        if download.automatic {
+                            download.abort.abort();
+                        }
+                        !download.automatic
+                    });
+                }
+                self.preference_error = local::config_path("media.json")
+                    .and_then(|path| local::write(&path, &automatic))
+                    .err()
+                    .map(|error| format!("Could not save image settings: {error}"));
             }
             Message::Close => self.opened = None,
             Message::ZoomIn => self.zoom = (self.zoom + 1).min(ZOOM_LEVELS.len() - 1),
@@ -236,7 +324,7 @@ impl Media {
             });
             dialog = dialog.control(controls).control(viewport);
         } else {
-            let status = if self.pending.contains(&(url.to_owned(), Size::Preview)) {
+            let status = if self.pending.contains_key(&(url.to_owned(), Size::Preview)) {
                 "Loading image…"
             } else {
                 "This image could not be displayed."
@@ -272,12 +360,15 @@ pub fn direct_image(post: &Post) -> Option<&str> {
         .url_content_type
         .as_deref()
         .is_some_and(|kind| kind.starts_with("image/"));
-    let image_extension = url.path().rsplit_once('.').is_some_and(|(_, suffix)| {
+    (image_type || looks_like_image(url)).then_some(url.as_str())
+}
+
+pub fn looks_like_image(url: &Url) -> bool {
+    url.path().rsplit_once('.').is_some_and(|(_, suffix)| {
         ["png", "jpg", "jpeg", "webp", "gif"]
             .iter()
             .any(|ext| suffix.eq_ignore_ascii_case(ext))
-    });
-    (image_type || image_extension).then_some(url.as_str())
+    })
 }
 
 pub fn thumbnail(post: &Post) -> Option<&str> {
@@ -411,15 +502,28 @@ mod tests {
     fn failed_downloads_are_deduplicated_and_can_be_retried() {
         use cosmic::iced::runtime;
         let mut media = Media::new(reqwest::Client::new());
+        media.automatic = true;
         let url = "https://example.com/image.png".to_owned();
         let size = Size::Preview;
         assert!(runtime::task::into_stream(media.request([url.clone()], size)).is_some());
         assert!(runtime::task::into_stream(media.request([url.clone()], size)).is_none());
 
-        let _ = media.update(Message::Loaded(url.clone(), size, None));
+        let id = media.pending[&(url.clone(), size)].id;
+        let _ = media.update(Message::Loaded(url.clone(), size, id, None));
         assert!(runtime::task::into_stream(media.request([url.clone()], size)).is_none());
         assert!(runtime::task::into_stream(media.update(Message::Open(url))).is_some());
     }
+    #[test]
+    fn manual_image_requests_work_with_automatic_loading_disabled() {
+        use cosmic::iced::runtime;
+
+        let mut media = Media::new(reqwest::Client::new());
+        media.automatic = false;
+        let url = "https://example.com/image.png".to_owned();
+        assert!(runtime::task::into_stream(media.request([url.clone()], Size::Preview)).is_none());
+        assert!(runtime::task::into_stream(media.update(Message::Open(url))).is_some());
+    }
+
     #[test]
     fn image_viewer_clamps_zoom_and_resets_for_each_image() {
         let mut media = Media::new(reqwest::Client::new());

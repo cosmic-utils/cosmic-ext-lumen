@@ -326,6 +326,39 @@ impl App {
         ])
     }
 
+    pub(super) fn load_publish_image(&mut self) -> Task<Message> {
+        if let Some(url) = self.publish.image_url().filter(|_| self.publish.visible) {
+            return self
+                .media
+                .request_preview(url.to_owned())
+                .map(Message::Media)
+                .map(cosmic::Action::App);
+        }
+        Task::none()
+    }
+
+    pub(super) fn load_visible_images(&mut self) -> Task<Message> {
+        let thumbnails = self.media.request(
+            self.feed.posts.iter().filter_map(|post| {
+                (!post.community.nsfw)
+                    .then(|| media::thumbnail(&post.post))
+                    .flatten()
+                    .map(str::to_owned)
+            }),
+            media::Size::Thumbnail,
+        );
+        let avatars = self.media.request(
+            self.feed.avatar_urls().chain(self.inbox.avatar_urls()),
+            media::Size::Avatar,
+        );
+        Task::batch([
+            thumbnails.map(Message::Media).map(cosmic::Action::App),
+            avatars.map(Message::Media).map(cosmic::Action::App),
+            self.load_navigation_avatars(),
+            self.load_discussion_images(),
+        ])
+    }
+
     fn load_discussion_images(&mut self) -> Task<Message> {
         cosmic::iced::Task::batch([
             self.media
@@ -360,6 +393,29 @@ impl App {
                 .update(media::Message::Open(url))
                 .map(Message::Media)
                 .map(cosmic::Action::App),
+            message @ (post::Message::EditPost(_) | post::Message::CrossPost(_)) => {
+                if self.accounts.busy || self.publish.visible || self.publish.busy {
+                    return Task::none();
+                }
+                let (id, editing) = match message {
+                    post::Message::EditPost(id) => (id, true),
+                    post::Message::CrossPost(id) => (id, false),
+                    _ => unreachable!(),
+                };
+                if let (Some(account), Some(source)) = (
+                    self.accounts.active(),
+                    self.post.publish_source(id, editing),
+                ) {
+                    if editing {
+                        self.publish.open_edit(&account.id, source);
+                    } else {
+                        self.publish.open_cross(&account.id, source);
+                    }
+                    self.close_drawer();
+                    return self.load_publish_image();
+                }
+                Task::none()
+            }
             post::Message::OpenCommunity(id) => self.open_community(id),
             post::Message::OpenPerson(id) => {
                 self.navigate_feed(feed::Message::Scope(feed::Scope::Profile(id)))
@@ -371,6 +427,7 @@ impl App {
                 Task::none()
             }
             post::Message::Act(..)
+            | post::Message::ConfirmDelete(..)
             | post::Message::SubmitComment(..)
             | post::Message::Vote(..)
             | post::Message::SaveComment(..)

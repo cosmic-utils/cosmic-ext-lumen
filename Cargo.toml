@@ -7,10 +7,10 @@ description = "A native Lemmy reader for the COSMIC desktop"
 repository = "https://github.com/cosmic-utils/cosmic-ext-lemmy"
 
 [dependencies]
-libcosmic = { git = "https://github.com/pop-os/libcosmic.git", rev = "8fa46ccd444ca6521ce247ef62c63f9e207348e5", features = ["markdown", "wgpu"] }
+libcosmic = { git = "https://github.com/pop-os/libcosmic.git", rev = "8fa46ccd444ca6521ce247ef62c63f9e207348e5", features = ["markdown", "wgpu", "xdg-portal"] }
 lemmy_api_common = { version = "=0.19.21", default-features = false }
 image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 directories = "6"

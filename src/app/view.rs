@@ -1,7 +1,10 @@
 use super::{App, Column, Destination, Drawer, Message, SEARCH_ID};
 use crate::{
     features::{feed, post},
-    shared::presentation::{community_label, community_title, toggle_button_class},
+    shared::{
+        media,
+        presentation::{community_label, community_title, toggle_button_class},
+    },
 };
 use cosmic::{
     Element,
@@ -258,6 +261,15 @@ impl App {
                         .push(widget::divider::horizontal::light());
                 }
                 content = content.push(self.accounts.view(&self.media).map(Message::Accounts));
+                content = content.push(widget::divider::horizontal::light()).push(
+                    widget::toggler(self.media.automatic())
+                        .label("Load images automatically".to_owned())
+                        .spacing(space.space_xxs)
+                        .on_toggle(|enabled| Message::Media(media::Message::Automatic(enabled))),
+                );
+                if let Some(error) = self.media.preference_error() {
+                    content = content.push(widget::text::caption(error));
+                }
                 Some(context_drawer(content, Message::CloseDrawer).title("Accounts and instances"))
             }
             Drawer::Community(details) => {

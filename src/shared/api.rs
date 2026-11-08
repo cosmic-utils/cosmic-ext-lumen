@@ -118,6 +118,61 @@ impl Api {
         self.write(Method::PUT, endpoint, body).await
     }
 
+    pub async fn upload_image(
+        &self,
+        file: String,
+        mime: &str,
+        bytes: Vec<u8>,
+    ) -> Result<String, String> {
+        #[derive(serde::Deserialize)]
+        struct UploadedFile {
+            file: String,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct Upload {
+            files: Vec<UploadedFile>,
+        }
+
+        let token = self.token.as_ref().ok_or("Sign in to upload images.")?;
+        let mut url = self.base.join("pictrs/image").map_err(|e| e.to_string())?;
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(file)
+            .mime_str(mime)
+            .map_err(|e| e.to_string())?;
+        let response = self
+            .http
+            .post(url.clone())
+            .bearer_auth(token)
+            .multipart(reqwest::multipart::Form::new().part("images[]", part))
+            .send()
+            .await
+            .map_err(|e| format!("Could not upload image: {e}"))?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "The instance rejected the image (HTTP {}).",
+                response.status()
+            ));
+        }
+        let result: Upload = response
+            .json()
+            .await
+            .map_err(|_| "Unexpected image upload response.")?;
+        let file = result
+            .files
+            .into_iter()
+            .next()
+            .map(|entry| entry.file)
+            .filter(|file| {
+                !file.is_empty() && file != "." && file != ".." && !file.contains(['/', '\\'])
+            })
+            .ok_or("The instance did not return an image filename.")?;
+        url.path_segments_mut()
+            .map_err(|_| "Invalid image service URL.")?
+            .push(&file);
+        Ok(url.into())
+    }
+
     async fn write<Q: Serialize, R: DeserializeOwned>(
         &self,
         method: Method,
@@ -374,6 +429,29 @@ pub(crate) mod tests {
                 .await
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn uploads_an_image_to_the_active_instance() {
+        let (api, request) = serve(
+            "200 OK",
+            r#"{"files":[{"file":"new image.png"}],"msg":"ok"}"#,
+        )
+        .await;
+        let expected = api.base.join("pictrs/image/new%20image.png").unwrap();
+        let uploaded = api
+            .authenticated("reader".into())
+            .upload_image("image.png".into(), "image/png", b"image data".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(uploaded, expected.as_str());
+        let request = request.await.unwrap();
+        assert!(request.starts_with("POST /pictrs/image HTTP/1.1"));
+        assert!(request.contains("authorization: Bearer reader"));
+        assert!(request.contains("multipart/form-data; boundary="));
+        assert!(request.contains("name=\"images[]\""));
+        assert!(request.contains("filename=\"image.png\""));
+        assert!(request.contains("image data"));
     }
 
     #[test]

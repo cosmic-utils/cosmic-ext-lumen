@@ -695,9 +695,9 @@ impl Feed {
     }
 
     pub fn apply_post_update(&mut self, updated: PostView) -> Task<Message> {
-        if self.scope == Scope::Saved && !updated.saved {
+        if updated.post.deleted || (self.scope == Scope::Saved && !updated.saved) {
             if self.busy {
-                // The in-flight page may still include the bookmark.
+                // The in-flight page may still include the deleted or unsaved post.
                 return self.reload();
             }
             self.posts.retain(|post| post.post.id != updated.post.id);

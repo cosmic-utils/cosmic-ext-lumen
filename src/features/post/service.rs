@@ -10,7 +10,7 @@ use lemmy_api_common::{
         newtypes::{CommentId, PostId},
     },
     lemmy_db_views::structs::{CommentView, PostView},
-    post::{CreatePostLike, GetPost, GetPostResponse, PostResponse, SavePost},
+    post::{CreatePostLike, DeletePost, GetPost, GetPostResponse, PostResponse, SavePost},
 };
 
 pub const PAGE_SIZE: usize = 50;
@@ -80,6 +80,10 @@ pub async fn act(api: Api, post: &PostView, action: Action) -> Result<PostView, 
             api.post("post/like", &CreatePostLike { post_id, score })
                 .await?
         }
+        Action::SetDeleted(deleted) => {
+            api.post("post/delete", &DeletePost { post_id, deleted })
+                .await?
+        }
         Action::ToggleSaved => {
             api.put(
                 "post/save",
@@ -93,6 +97,11 @@ pub async fn act(api: Api, post: &PostView, action: Action) -> Result<PostView, 
     };
     if response.post_view.post.id != post_id {
         return Err("The instance returned a different post.".into());
+    }
+    if let Action::SetDeleted(deleted) = action
+        && response.post_view.post.deleted != deleted
+    {
+        return Err("The instance did not confirm the requested post status.".into());
     }
     Ok(response.post_view)
 }

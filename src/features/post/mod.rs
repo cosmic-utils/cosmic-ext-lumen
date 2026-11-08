@@ -74,6 +74,7 @@ pub struct Post {
     person_id: Option<PersonId>,
     pending_action: Option<(u64, PostId)>,
     action_error: Option<String>,
+    confirm_delete: bool,
     composer: Composer,
     replies: HashMap<CommentId, Composer>,
     active_reply: Option<CommentId>,
@@ -94,6 +95,7 @@ pub enum Action {
     Upvote,
     Downvote,
     ToggleSaved,
+    SetDeleted(bool),
 }
 
 enum CommentAction {
@@ -121,6 +123,10 @@ pub enum Message {
     ToggleFocus,
     OpenCommunity(CommunityId),
     OpenPerson(PersonId),
+    EditPost(PostId),
+    CrossPost(PostId),
+    ConfirmDelete(u64),
+    CancelDelete,
     CommunityDetails,
     Retry,
     More,
@@ -273,6 +279,7 @@ impl Post {
         self.more = false;
         self.error = None;
         self.action_error = None;
+        self.confirm_delete = false;
         self.active_reply = None;
         self.composer_open = false;
         self.comment_action_error = None;
@@ -286,6 +293,32 @@ impl Post {
         self.selected = Some(post);
     }
 
+    pub fn publish_source(&self, id: PostId, editing: bool) -> Option<&PostView> {
+        let post = self.selected.as_ref()?;
+        (post.post.id == id
+            && !post.post.deleted
+            && !post.post.removed
+            && (!editing
+                || (self.owns_post(post)
+                    && self.pending_action.is_none()
+                    && self.submitting.is_none())))
+        .then_some(post)
+    }
+
+    fn owns_post(&self, post: &PostView) -> bool {
+        self.person_id == Some(post.post.creator_id)
+    }
+
+    pub fn apply_edit(&mut self, post: PostView) {
+        if self
+            .selected
+            .as_ref()
+            .is_some_and(|current| current.post.id == post.post.id)
+        {
+            self.set_selected(post);
+        }
+    }
+
     fn act(&mut self, generation: u64, action: Action) -> Task<Message> {
         if generation != self.generation
             || self.pending_action.is_some()
@@ -296,9 +329,21 @@ impl Post {
         let (Some(api), Some(post)) = (&self.api, &self.selected) else {
             return Task::none();
         };
-        if !api.is_authenticated() {
+        let available = !post.post.deleted && !post.post.removed;
+        let allowed = match action {
+            Action::SetDeleted(deleted) => {
+                self.owns_post(post)
+                    && !post.post.removed
+                    && deleted != post.post.deleted
+                    && (!deleted || self.confirm_delete)
+            }
+            Action::ToggleSaved => available || post.saved,
+            Action::Upvote | Action::Downvote => available,
+        };
+        if !api.is_authenticated() || !allowed {
             return Task::none();
         }
+        self.confirm_delete = false;
         self.pending_action = Some((generation, post.post.id));
         self.action_error = None;
         let (api, post) = (api.clone(), post.clone());
@@ -698,6 +743,17 @@ impl Post {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::ConfirmDelete(generation)
+                if generation == self.generation
+                    && self.api.as_ref().is_some_and(Api::is_authenticated)
+                    && self
+                        .selected
+                        .as_ref()
+                        .is_some_and(|post| self.publish_source(post.post.id, true).is_some()) =>
+            {
+                self.confirm_delete = true;
+            }
+            Message::CancelDelete => self.confirm_delete = false,
             Message::Act(generation, action) => return self.act(generation, action),
             Message::Vote(generation, id, score) => {
                 return self.act_on_comment(generation, id, CommentCommand::Vote(score));
@@ -1424,5 +1480,43 @@ pub(crate) mod tests {
         assert!(post.composer.draft.text().is_empty());
         assert!(post.replies.is_empty());
         request.await.unwrap();
+    }
+    #[tokio::test]
+    async fn deleting_a_post_requires_ownership_and_confirmation() {
+        let existing = post_view();
+        let mut deleted = existing.clone();
+        deleted.post.deleted = true;
+        let response = json!({"post_view": deleted}).to_string();
+        let (api, request) = serve("200 OK", &response).await;
+        let mut post = Post::default();
+        let owner = existing.post.creator_id;
+        let _ = post.open(api.authenticated("reader".into()), existing);
+        let generation = post.generation;
+        let delete = Message::Act(generation, Action::SetDeleted(true));
+
+        let _ = post.update(Message::ConfirmDelete(generation));
+        assert!(!post.confirm_delete);
+        assert!(runtime::task::into_stream(post.update(delete.clone())).is_none());
+        post.set_person(Some(owner));
+        assert!(runtime::task::into_stream(post.update(delete.clone())).is_none());
+
+        let _ = post.update(Message::ConfirmDelete(generation));
+        assert!(post.confirm_delete);
+        let mut task = runtime::task::into_stream(post.update(delete)).unwrap();
+        let Some(runtime::Action::Output(Message::ActionFinished(generation, result))) =
+            task.next().await
+        else {
+            panic!("post deletion did not finish");
+        };
+        assert_eq!(post.finish_action(generation, result), Some(deleted));
+        assert!(post.selected.as_ref().unwrap().post.deleted);
+
+        let request = request.await.unwrap();
+        assert!(request.starts_with("POST /api/v3/post/delete HTTP/1.1"));
+        let (_, body) = request.split_once("\r\n\r\n").unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(body).unwrap(),
+            json!({"post_id": 17, "deleted": true})
+        );
     }
 }

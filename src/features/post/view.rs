@@ -221,7 +221,8 @@ impl Post {
                 .into();
         };
         let signed_in = self.api.as_ref().is_some_and(Api::is_authenticated);
-        let can_write = signed_in && !post.post.locked && !post.post.removed && !post.post.deleted;
+        let available = !post.post.removed && !post.post.deleted;
+        let can_write = signed_in && !post.post.locked && available;
         let can_act = signed_in
             && !account_busy
             && self.pending_action.is_none()
@@ -314,29 +315,36 @@ impl Post {
                 content = content.push(widget::text::caption("Loading comment…"));
             }
         }
-        if let Some(preview) = link_preview(&post.post, media) {
-            content = content.push(preview);
+        if available {
+            if let Some(preview) = link_preview(&post.post, media) {
+                content = content.push(preview);
+            }
+            if post.post.body.as_ref().is_some_and(|body| !body.is_empty()) {
+                content = content.push(markdown::view_with(
+                    self.body.items(),
+                    markdown_settings(),
+                    &DiscussionMarkdown(media),
+                ));
+            }
+        } else {
+            content = content.push(widget::text::body(if post.post.deleted {
+                "This post was deleted."
+            } else {
+                "This post was removed."
+            }));
         }
-        if post.post.body.as_ref().is_some_and(|body| !body.is_empty()) {
-            content = content.push(markdown::view_with(
-                self.body.items(),
-                markdown_settings(),
-                &DiscussionMarkdown(media),
-            ));
-        }
-
         let mut actions = widget::row::with_capacity(2)
             .spacing(space.space_xxs)
             .align_y(Alignment::Center)
             .push(votes(
                 post.counts.score,
                 post.my_vote,
-                can_act.then_some((
+                (can_act && available).then_some((
                     Message::Act(self.generation, Action::Upvote),
                     Message::Act(self.generation, Action::Downvote),
                 )),
             ));
-        if signed_in {
+        if signed_in && (available || post.saved) {
             actions = actions.push(
                 button::standard(if post.saved { "Saved" } else { "Save" })
                     .class(toggle_button_class(
@@ -349,7 +357,39 @@ impl Post {
                     ),
             );
         }
-        content = content.push(actions);
+        if signed_in && available {
+            actions = actions.push(
+                button::text("Cross-post")
+                    .on_press_maybe(can_act.then_some(Message::CrossPost(post.post.id))),
+            );
+        }
+        if signed_in && self.owns_post(post) && !post.post.removed {
+            if post.post.deleted {
+                actions = actions.push(button::text("Restore post").on_press_maybe(
+                    can_act.then_some(Message::Act(self.generation, Action::SetDeleted(false))),
+                ));
+            } else {
+                actions = actions
+                    .push(
+                        button::text("Edit post")
+                            .on_press_maybe(can_act.then_some(Message::EditPost(post.post.id))),
+                    )
+                    .push(button::text("Delete post").on_press_maybe(
+                        can_act.then_some(Message::ConfirmDelete(self.generation)),
+                    ));
+            }
+        }
+        content = content.push(actions.wrap());
+        if self.confirm_delete {
+            content = content.push(widget::text::body("Delete this post?")).push(
+                widget::row::with_capacity(2)
+                    .spacing(space.space_xxs)
+                    .push(button::destructive("Delete").on_press_maybe(
+                        can_act.then_some(Message::Act(self.generation, Action::SetDeleted(true))),
+                    ))
+                    .push(button::standard("Cancel").on_press(Message::CancelDelete)),
+            );
+        }
         if let Some(error) = &self.action_error {
             content = content.push(widget::text::body(error));
         }

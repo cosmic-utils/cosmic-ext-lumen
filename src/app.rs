@@ -228,7 +228,7 @@ impl cosmic::Application for App {
         }
         self.publish.visible.then(|| {
             self.publish
-                .view(self.accounts.follows())
+                .view(self.accounts.follows(), &self.media)
                 .map(Message::Publish)
         })
     }
@@ -337,8 +337,8 @@ impl cosmic::Application for App {
             Message::Media(media::Message::OpenInBrowser(url)) => {
                 self.update(Message::OpenLink(url))
             }
-            Message::Media(message @ media::Message::Loaded(_, media::Size::Avatar, _)) => {
-                let nav_changed = matches!(&message, media::Message::Loaded(url, _, Some(_))
+            Message::Media(message @ media::Message::Loaded(_, media::Size::Avatar, _, _)) => {
+                let nav_changed = matches!(&message, media::Message::Loaded(url, _, _, Some(_))
                     if self.navigation_communities().any(|community| community.icon.as_ref().is_some_and(|icon| icon.as_str() == url)));
                 let _ = self.media.update(message);
                 if nav_changed {
@@ -346,23 +346,62 @@ impl cosmic::Application for App {
                 }
                 Task::none()
             }
+            Message::Media(media::Message::Automatic(automatic)) => {
+                let _ = self.media.update(media::Message::Automatic(automatic));
+                if automatic {
+                    self.load_visible_images()
+                } else {
+                    Task::none()
+                }
+            }
             Message::Media(message) => self
                 .media
                 .update(message)
                 .map(Message::Media)
                 .map(cosmic::Action::App),
+            Message::Publish(publish::Message::OpenLink(url)) => {
+                self.update(Message::OpenLink(url))
+            }
             Message::Publish(message) => {
-                if self.accounts.busy && matches!(message, publish::Message::Submit) {
+                if self.accounts.busy
+                    && matches!(
+                        message,
+                        publish::Message::Submit | publish::Message::UploadImage
+                    )
+                {
                     return Task::none();
                 }
+                let image_changed = matches!(
+                    message,
+                    publish::Message::Url(_)
+                        | publish::Message::UploadFinished(..)
+                        | publish::Message::TogglePreview
+                );
+                let editing = self.publish.editing();
                 let (task, created) = self.publish.update(
                     message,
                     self.feed.api(),
                     self.accounts.follows(),
                     self.session,
                 );
-                let task = task.map(Message::Publish).map(cosmic::Action::App);
+                let task = Task::batch([
+                    task.map(Message::Publish).map(cosmic::Action::App),
+                    if image_changed {
+                        self.load_publish_image()
+                    } else {
+                        Task::none()
+                    },
+                ]);
                 if let Some(post) = created {
+                    if editing {
+                        self.post.apply_edit(post.clone());
+                        let feed = self
+                            .feed
+                            .apply_post_update(post)
+                            .map(Message::Feed)
+                            .map(cosmic::Action::App);
+                        return Task::batch([task, feed, self.load_visible_images()]);
+                    }
                     let feed = self.navigate_feed(feed::Message::Scope(feed::Scope::All));
                     Task::batch([task, feed, self.open_post(post, None)])
                 } else {
@@ -409,13 +448,19 @@ impl cosmic::Application for App {
             Message::FocusSearch if self.feed.api().is_some() && !self.publish.visible => {
                 operation::focus(SEARCH_ID)
             }
-            Message::NewPost if self.feed.signed_in() && !self.accounts.busy => {
-                self.close_drawer();
-                self.publish.open(
-                    self.community_scope
-                        .as_ref()
-                        .or_else(|| self.post.selected.as_ref().map(|post| &post.community)),
-                );
+            Message::NewPost
+                if !self.accounts.busy && !self.publish.visible && !self.publish.busy =>
+            {
+                if let Some(account) = self.accounts.active() {
+                    self.publish.open_new(
+                        &account.id,
+                        self.community_scope
+                            .as_ref()
+                            .or_else(|| self.post.selected.as_ref().map(|post| &post.community)),
+                    );
+                    self.close_drawer();
+                    return self.load_publish_image();
+                }
                 Task::none()
             }
             Message::ResizeColumns(event) => {
