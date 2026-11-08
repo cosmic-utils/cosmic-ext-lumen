@@ -1,9 +1,9 @@
 [Desktop Entry]
-Name=Lemmy
+Name=Lumen
 Comment=Browse Lemmy communities and discussions
 Type=Application
-Exec=cosmic-ext-lemmy
-Icon=io.github.cosmic_utils.cosmic_ext_lemmy
+Exec=cosmic-ext-lumen
+Icon=dev.edfloreshz.Lumen
 Terminal=false
 Categories=Network;News;
 Keywords=Lemmy;Fediverse;COSMIC;

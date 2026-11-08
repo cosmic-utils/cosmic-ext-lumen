@@ -1,5 +1,5 @@
 //! Optional public, read-only smoke test. Never runs in the default suite.
-use cosmic_ext_lemmy::shared::api::{Api, http_client};
+use cosmic_ext_lumen::shared::api::{Api, http_client};
 use lemmy_api_common::{
     comment::{GetComments, GetCommentsResponse},
     post::{GetPosts, GetPostsResponse},

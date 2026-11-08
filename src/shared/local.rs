@@ -5,8 +5,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub fn project_dirs() -> Option<directories::ProjectDirs> {
+    directories::ProjectDirs::from("dev", "edfloreshz", crate::APP_NAME)
+}
+
 pub fn config_path(relative: impl AsRef<Path>) -> io::Result<PathBuf> {
-    directories::ProjectDirs::from("io", "github.cosmic-utils", "cosmic-ext-lemmy")
+    project_dirs()
         .map(|dirs| dirs.config_dir().join(relative))
         .ok_or_else(|| io::Error::other("Could not locate the settings directory"))
 }

@@ -1,9 +1,9 @@
 [package]
-name = "cosmic-ext-lemmy"
+name = "cosmic-ext-lumen"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.93"
-description = "A native Lemmy reader for the COSMIC desktop"
+description = "Lumen, a native Lemmy client for the COSMIC desktop"
 repository = "https://github.com/cosmic-utils/cosmic-ext-lemmy"
 
 [dependencies]

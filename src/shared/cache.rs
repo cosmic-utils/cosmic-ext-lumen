@@ -1,5 +1,4 @@
 //! Bounded, best-effort storage for disposable cache entries.
-use directories::ProjectDirs;
 use std::{
     fs::{self, File, OpenOptions},
     hash::{DefaultHasher, Hash, Hasher},
@@ -20,7 +19,7 @@ pub enum Cache {
 
 impl Cache {
     fn directory(self) -> Option<PathBuf> {
-        let dirs = ProjectDirs::from("io", "github.cosmic-utils", "cosmic-ext-lemmy")?;
+        let dirs = super::local::project_dirs()?;
         Some(dirs.cache_dir().join(match self {
             Self::Images => "images-v1",
             Self::Reading => "reading-v1",

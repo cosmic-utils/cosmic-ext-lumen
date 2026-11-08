@@ -243,6 +243,27 @@ impl Media {
             .map(|picture| picture.handle.clone())
     }
 
+    pub fn feed_picture(&self, sources: &[String]) -> Option<Handle> {
+        sources.iter().find_map(|url| {
+            self.get(url, Size::Thumbnail)
+                .or_else(|| self.get(url, Size::Preview))
+        })
+    }
+
+    pub fn next_thumbnail(&self, sources: Vec<String>) -> Option<String> {
+        for url in sources {
+            if self.get(&url, Size::Preview).is_some() {
+                return None;
+            }
+            match self.cache.get(&(url.clone(), Size::Thumbnail)) {
+                Some(Some(_)) => return None,
+                Some(None) => continue,
+                None => return Some(url),
+            }
+        }
+        None
+    }
+
     pub fn avatar(&self, url: Option<&str>, fallback: &str) -> icon::Handle {
         url.and_then(|url| self.get(url, Size::Avatar)).map_or_else(
             || icon::from_name(fallback).handle(),
@@ -381,6 +402,34 @@ pub fn thumbnail(post: &Post) -> Option<&str> {
         .or_else(|| direct_image(post))
 }
 
+pub fn feed_thumbnail_sources(
+    post: &lemmy_api_common::lemmy_db_views::structs::PostView,
+) -> Vec<String> {
+    if post.community.nsfw || post.post.nsfw || post.post.deleted || post.post.removed {
+        return Vec::new();
+    }
+    let mut sources: Vec<_> = post
+        .post
+        .thumbnail_url
+        .as_ref()
+        .map(|url| url.as_str())
+        .into_iter()
+        .chain(direct_image(&post.post))
+        .filter(|url| web_url(url))
+        .map(str::to_owned)
+        .collect();
+    sources.dedup();
+    if let Some(body) = post.post.body.as_deref().filter(|body| body.contains("![")) {
+        let content = widget::markdown::Content::parse(body);
+        if let Some(url) = content.images().iter().filter(|url| web_url(url)).min()
+            && !sources.contains(url)
+        {
+            sources.push(url.clone());
+        }
+    }
+    sources
+}
+
 pub fn web_url(value: &str) -> bool {
     Url::parse(value).is_ok_and(|url| {
         matches!(url.scheme(), "http" | "https")
@@ -457,6 +506,44 @@ fn decode(bytes: &[u8], size: Size) -> Option<Picture> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn feed_thumbnail_falls_back_to_original_and_markdown_images() {
+        use crate::features::post::tests::post_view;
+
+        let mut post = post_view();
+        post.post.thumbnail_url = Some(
+            Url::parse("https://example.com/thumbnail.webp")
+                .unwrap()
+                .into(),
+        );
+        post.post.url = Some(
+            Url::parse("https://example.com/original.png")
+                .unwrap()
+                .into(),
+        );
+        post.post.body = Some("![Image](https://example.com/embedded.png)".into());
+        let sources = feed_thumbnail_sources(&post);
+        assert_eq!(
+            sources,
+            [
+                "https://example.com/thumbnail.webp",
+                "https://example.com/original.png",
+                "https://example.com/embedded.png",
+            ]
+        );
+
+        let mut media = Media::new(reqwest::Client::new());
+        media.automatic = true;
+        let first = media.next_thumbnail(sources.clone()).unwrap();
+        let _ = media.request([first.clone()], Size::Thumbnail);
+        let id = media.pending[&(first.clone(), Size::Thumbnail)].id;
+        let _ = media.update(Message::Loaded(first, Size::Thumbnail, id, None));
+        assert_eq!(
+            media.next_thumbnail(sources).as_deref(),
+            Some("https://example.com/original.png")
+        );
+    }
 
     #[tokio::test]
     async fn can_open_a_cached_image_without_its_server() {

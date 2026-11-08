@@ -5,7 +5,7 @@ mod view;
 pub(crate) use service::get_post;
 pub(crate) use view::render_markdown;
 
-pub const SCROLL_ID: &str = "lemmy-discussion";
+pub const SCROLL_ID: &str = "lumen-discussion";
 
 use crate::shared::{
     api::{Api, Freshness},

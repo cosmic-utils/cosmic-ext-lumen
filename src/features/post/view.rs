@@ -63,25 +63,24 @@ impl<'a> markdown::Viewer<'a, Message, cosmic::Theme, cosmic::Renderer> for Disc
 fn preview_image<'a>(media: &Media, url: &str, label: &'a str) -> Element<'a, Message> {
     let open = Message::OpenImage(url.to_owned());
     let height = Length::Fixed(320.0);
-    if let Some(picture) = media
-        .get(url, Size::Preview)
-        .or_else(|| media.get(url, Size::Thumbnail))
-    {
-        return button::custom(media::image_view(picture, Length::Fill, height))
+    let preview: Element<'_, Message> = if let Some(picture) = media.get(url, Size::Preview) {
+        button::custom(media::image_view(picture, Length::Fill, height))
             .class(button::ButtonClass::Icon)
+            .width(Length::Fill)
             .padding(0)
             .on_press(open)
-            .into();
-    }
-    widget::container(
+            .into()
+    } else {
         button::standard(label)
             .leading_icon(icon::from_name("image-x-generic-symbolic"))
-            .on_press(open),
-    )
-    .class(Container::Card)
-    .center_x(Length::Fill)
-    .center_y(height)
-    .into()
+            .on_press(open)
+            .into()
+    };
+    widget::container(preview)
+        .class(Container::Card)
+        .center_x(Length::Fill)
+        .center_y(height)
+        .into()
 }
 
 fn link_preview<'a>(
@@ -125,16 +124,17 @@ fn link_preview<'a>(
         .spacing(space.space_xs)
         .align_y(Alignment::Center)
         .push(description);
-    if let Some(picture) = media::thumbnail(post).and_then(|url| {
-        media
+    if let Some(url) = media::thumbnail(post).filter(|url| media::web_url(url)) {
+        let width = Length::Fixed(84.0);
+        let height = Length::Fixed(72.0);
+        let picture = media
             .get(url, Size::Preview)
-            .or_else(|| media.get(url, Size::Thumbnail))
-    }) {
-        row = row.push(media::image_view(
-            picture,
-            Length::Fixed(84.0),
-            Length::Fixed(72.0),
-        ));
+            .or_else(|| media.get(url, Size::Thumbnail));
+        if let Some(picture) = picture {
+            row = row.push(media::image_view(picture, width, height));
+        } else if media.automatic() {
+            row = row.push(widget::space().width(width).height(height));
+        }
     }
     Some(selectable_card(
         row,
@@ -296,9 +296,9 @@ impl Post {
             .spacing(space.space_xs)
             .push(metadata)
             .push(if narrow {
-                widget::text::title2(&post.post.name)
+                widget::text::title3(&post.post.name)
             } else {
-                widget::text::title1(&post.post.name)
+                widget::text::title2(&post.post.name)
             });
         if let Some(id) = self.focused_comment {
             if let Some(comment) = self

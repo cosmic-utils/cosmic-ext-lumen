@@ -206,25 +206,12 @@ impl App {
                 | feed::Message::ProfileLoaded(..)
                 | feed::Message::SavedCommentsLoaded(..)
         );
-        let skip_thumbnails = if matches!(message, feed::Message::Loaded(_, false, _)) {
-            0
-        } else {
-            self.feed.posts.len()
-        };
         let (task, selected) = self.feed.update(message);
-        let thumbnails = self.media.request(
-            self.feed
-                .posts
-                .iter()
-                .skip(skip_thumbnails)
-                .filter_map(|post| {
-                    (!post.community.nsfw)
-                        .then(|| media::thumbnail(&post.post))
-                        .flatten()
-                        .map(str::to_owned)
-                }),
-            media::Size::Thumbnail,
-        );
+        let thumbnails = if received_results || selected.is_some() {
+            self.load_feed_thumbnails(None)
+        } else {
+            Task::none()
+        };
         let avatars = if received_results {
             self.media
                 .request(self.feed.avatar_urls(), media::Size::Avatar)
@@ -233,7 +220,7 @@ impl App {
         };
         let task = Task::batch([
             task.map(Message::Feed).map(cosmic::Action::App),
-            thumbnails.map(Message::Media).map(cosmic::Action::App),
+            thumbnails,
             avatars.map(Message::Media).map(cosmic::Action::App),
         ]);
         if let Some((post, comment)) = selected.filter(|_| self.destination == Destination::Feed)
@@ -337,22 +324,31 @@ impl App {
         Task::none()
     }
 
+    pub(super) fn load_feed_thumbnails(&mut self, failed: Option<&str>) -> Task<Message> {
+        if !self.media.automatic() {
+            return Task::none();
+        }
+        let urls: Vec<_> = self
+            .feed
+            .posts
+            .iter()
+            .map(media::feed_thumbnail_sources)
+            .filter(|sources| failed.is_none_or(|url| sources.iter().any(|source| source == url)))
+            .filter_map(|sources| self.media.next_thumbnail(sources))
+            .collect();
+        self.media
+            .request(urls, media::Size::Thumbnail)
+            .map(Message::Media)
+            .map(cosmic::Action::App)
+    }
+
     pub(super) fn load_visible_images(&mut self) -> Task<Message> {
-        let thumbnails = self.media.request(
-            self.feed.posts.iter().filter_map(|post| {
-                (!post.community.nsfw)
-                    .then(|| media::thumbnail(&post.post))
-                    .flatten()
-                    .map(str::to_owned)
-            }),
-            media::Size::Thumbnail,
-        );
         let avatars = self.media.request(
             self.feed.avatar_urls().chain(self.inbox.avatar_urls()),
             media::Size::Avatar,
         );
         Task::batch([
-            thumbnails.map(Message::Media).map(cosmic::Action::App),
+            self.load_feed_thumbnails(None),
             avatars.map(Message::Media).map(cosmic::Action::App),
             self.load_navigation_avatars(),
             self.load_discussion_images(),

@@ -1,7 +1,7 @@
 use super::Registry;
-const SERVICE: &str = "io.github.cosmic_utils.cosmic_ext_lemmy";
+
 fn entry(id: &str) -> Result<keyring::Entry, String> {
-    keyring::Entry::new(SERVICE, id).map_err(|e| format!("Credential store unavailable: {e}"))
+    keyring::Entry::new(crate::APP_ID, id).map_err(|e| format!("Credential store unavailable: {e}"))
 }
 pub fn read_token(id: &str) -> Result<String, String> {
     entry(id)?.get_password().map_err(|e| {
@@ -20,9 +20,7 @@ pub fn delete_token(id: &str) -> Result<(), String> {
     }
 }
 fn path() -> Result<std::path::PathBuf, String> {
-    directories::ProjectDirs::from("io", "github.cosmic-utils", "cosmic-ext-lemmy")
-        .map(|d| d.config_dir().join("accounts.json"))
-        .ok_or("Cannot locate settings directory".into())
+    crate::shared::local::config_path("accounts.json").map_err(|error| error.to_string())
 }
 pub fn load() -> Result<Registry, String> {
     let path = path()?;

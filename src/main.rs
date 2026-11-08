@@ -1,6 +1,6 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let http = cosmic_ext_lemmy::shared::api::http_client()?;
-    cosmic::app::run::<cosmic_ext_lemmy::app::App>(
+    let http = cosmic_ext_lumen::shared::api::http_client()?;
+    cosmic::app::run::<cosmic_ext_lumen::app::App>(
         cosmic::app::Settings::default().size(cosmic::iced::Size::new(1100.0, 800.0)),
         http,
     )?;

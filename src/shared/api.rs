@@ -35,7 +35,11 @@ impl ReadError {
 
 pub fn http_client() -> Result<Client, reqwest::Error> {
     Client::builder()
-        .user_agent(concat!("cosmic-ext-lemmy/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!(
+            env!("CARGO_PKG_NAME"),
+            "/",
+            env!("CARGO_PKG_VERSION")
+        ))
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
         .build()
@@ -548,7 +552,7 @@ pub(crate) mod tests {
         assert!(
             request.starts_with("GET /api/v3/post/list?community_name=rust%40example.com HTTP/1.1")
         );
-        assert!(request.to_lowercase().contains("cosmic-ext-lemmy/"));
+        assert!(request.to_lowercase().contains("cosmic-ext-lumen/"));
     }
 
     #[tokio::test]

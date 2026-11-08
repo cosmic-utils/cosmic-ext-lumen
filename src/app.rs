@@ -20,7 +20,7 @@ use lemmy_api_common::{
     lemmy_db_views_actor::structs::CommunityView,
 };
 
-const SEARCH_ID: &str = "lemmy-search";
+const SEARCH_ID: &str = "lumen-search";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Destination {
@@ -108,7 +108,7 @@ impl cosmic::Application for App {
     type Executor = cosmic::executor::Default;
     type Flags = reqwest::Client;
     type Message = Message;
-    const APP_ID: &'static str = "io.github.cosmic_utils.cosmic_ext_lemmy";
+    const APP_ID: &'static str = crate::APP_ID;
 
     fn core(&self) -> &cosmic::Core {
         &self.core
@@ -148,12 +148,11 @@ impl cosmic::Application for App {
             focused: false,
             compact: false,
         };
-        app.set_header_title("Lemmy".into());
+        app.set_header_title(crate::APP_NAME.into());
         app.rebuild_nav();
-        let title = app
-            .core
-            .main_window_id()
-            .map_or_else(Task::none, |id| app.set_window_title("Lemmy".into(), id));
+        let title = app.core.main_window_id().map_or_else(Task::none, |id| {
+            app.set_window_title(crate::APP_NAME.into(), id)
+        });
         let preview = app
             .accounts
             .remembered_active()
@@ -207,7 +206,7 @@ impl cosmic::Application for App {
     }
 
     fn header_start(&self) -> Vec<cosmic::Element<'_, Message>> {
-        vec![self.account_control()]
+        self.new_post_control()
     }
 
     fn header_center(&self) -> Vec<cosmic::Element<'_, Message>> {
@@ -215,7 +214,7 @@ impl cosmic::Application for App {
     }
 
     fn header_end(&self) -> Vec<cosmic::Element<'_, Message>> {
-        self.new_post_control()
+        vec![self.account_control()]
     }
 
     fn context_drawer(&self) -> Option<cosmic::app::ContextDrawer<'_, Message>> {
@@ -345,6 +344,15 @@ impl cosmic::Application for App {
                     self.rebuild_nav();
                 }
                 Task::none()
+            }
+            Message::Media(media::Message::Loaded(url, media::Size::Thumbnail, id, None)) => {
+                let _ = self.media.update(media::Message::Loaded(
+                    url.clone(),
+                    media::Size::Thumbnail,
+                    id,
+                    None,
+                ));
+                self.load_feed_thumbnails(Some(&url))
             }
             Message::Media(media::Message::Automatic(automatic)) => {
                 let _ = self.media.update(media::Message::Automatic(automatic));

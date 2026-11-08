@@ -1,4 +1,3 @@
-use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -7,9 +6,7 @@ struct Settings {
 }
 
 fn path() -> Result<std::path::PathBuf, String> {
-    ProjectDirs::from("io", "github.cosmic-utils", "cosmic-ext-lemmy")
-        .map(|dirs| dirs.config_dir().join("settings.json"))
-        .ok_or_else(|| "Could not locate the settings directory.".into())
+    crate::shared::local::config_path("settings.json").map_err(|error| error.to_string())
 }
 
 pub fn load() -> (String, Option<String>) {

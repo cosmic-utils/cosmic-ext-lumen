@@ -2,7 +2,7 @@ use super::{Feed, Message, Scope, SearchKind, Sort};
 use crate::{
     features::post::render_markdown,
     shared::{
-        media::{self, Media, Size},
+        media::{self, Media},
         presentation::{
             age, community_handle, community_label, person_handle, selectable_card,
             toggle_button_class,
@@ -19,7 +19,7 @@ use cosmic::{
 };
 use lemmy_api_common::lemmy_db_schema::{newtypes::PostId, source::community::Community};
 
-pub const SCROLL_ID: &str = "lemmy-feed";
+pub const SCROLL_ID: &str = "lumen-feed";
 
 impl Feed {
     pub fn view<'a>(
@@ -104,7 +104,8 @@ impl Feed {
                 .push(
                     widget::text::caption(community_label(&post.community))
                         .width(Length::Fill)
-                        .wrapping(Wrapping::WordOrGlyph),
+                        .wrapping(Wrapping::None)
+                        .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1))),
                 )
                 .push(widget::text::caption(age(post.post.published.timestamp())));
             let stats = widget::row::with_capacity(4)
@@ -114,9 +115,8 @@ impl Feed {
                 .push(widget::text::caption(post.counts.score.to_string()))
                 .push(icon::from_name("chat-symbolic").size(12).icon())
                 .push(widget::text::caption(post.counts.comments.to_string()));
-            let card = widget::column::with_capacity(3)
+            let text = widget::column::with_capacity(2)
                 .spacing(space.space_xxxs)
-                .push(metadata)
                 .push(
                     widget::text::body(&post.post.name)
                         .font(cosmic::font::semibold())
@@ -124,28 +124,26 @@ impl Feed {
                 )
                 .push(stats)
                 .width(Length::Fill);
-            let picture = media::thumbnail(&post.post)
-                .filter(|_| !post.community.nsfw)
-                .and_then(|url| {
-                    media
-                        .get(url, Size::Thumbnail)
-                        .or_else(|| media.get(url, Size::Preview))
-                });
-            let card: Element<'_, Message> = if let Some(picture) = picture {
-                let side = if compact { 44.0 } else { 64.0 };
-                widget::row::with_capacity(2)
-                    .spacing(space.space_xs)
-                    .align_y(Alignment::Center)
-                    .push(card)
-                    .push(media::image_view(
-                        picture,
-                        Length::Fixed(side),
-                        Length::Fixed(side),
-                    ))
-                    .into()
-            } else {
-                card.into()
-            };
+            let sources = media::feed_thumbnail_sources(post);
+            let picture = media.feed_picture(&sources);
+            let mut body = widget::row::with_capacity(2)
+                .spacing(space.space_xs)
+                .align_y(Alignment::Start)
+                .push(text);
+            if !sources.is_empty() && (media.automatic() || picture.is_some()) {
+                let side = Length::Fixed(if compact { 44.0 } else { 64.0 });
+                let thumbnail: Element<'_, Message> = if let Some(picture) = picture {
+                    media::image_view(picture, side, side).into()
+                } else {
+                    widget::space().width(side).height(side).into()
+                };
+                body = body.push(thumbnail);
+            }
+            let card = widget::column::with_capacity(2)
+                .spacing(space.space_xxxs)
+                .push(metadata)
+                .push(body)
+                .width(Length::Fill);
             content = content.push(selectable_card(
                 card,
                 if compact {
