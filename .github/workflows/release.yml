@@ -1,0 +1,52 @@
+name: Release AppImage
+
+on:
+  push:
+    tags:
+      - '**'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: appimage-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: ${{ !github.event.deleted }}
+    runs-on: ubuntu-24.04
+    env:
+      RUSTUP_TOOLCHAIN: 1.93.0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install build and packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkgconf libexpat1-dev libfontconfig-dev \
+            libfreetype-dev libxkbcommon-dev desktop-file-utils just zsync
+          rustup toolchain install 1.93.0 --profile minimal
+
+      - name: Build and verify release assets
+        run: just appimage
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          cd dist
+          sha256sum --check SHA256SUMS
+          assets=(Lumen-x86_64.AppImage Lumen-x86_64.AppImage.zsync SHA256SUMS)
+          if draft=$(gh release view --json isDraft --jq .isDraft -- "$GITHUB_REF_NAME"); then
+            gh release upload --clobber -- "$GITHUB_REF_NAME" "${assets[@]}"
+            if [[ "$draft" == true ]]; then
+              gh release edit --draft=false -- "$GITHUB_REF_NAME"
+            fi
+          else
+            gh release create --verify-tag --generate-notes -- "$GITHUB_REF_NAME" "${assets[@]}"
+          fi
