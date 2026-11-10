@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="resources/icon.svg" width="112" height="112" alt="Lumen app icon">
+  <img src="resources/icons/hicolor/scalable/apps/icon.svg" width="112" height="112" alt="Lumen app icon">
 </p>
 
 <h1 align="center">Lumen</h1>
@@ -80,3 +80,11 @@ cargo run --locked
 ```
 
 To install the launcher and icon into your user applications, run `just install`. With a custom prefix, run `just install /path/to/prefix`.
+
+Use `just uninstall` with the same prefix to remove the installed files. Cargo
+generates the localized desktop entry and AppStream metadata in `target/xdgen/`
+from the templates in `resources/` and the Fluent strings in `i18n/`.
+
+`just vendor` creates `target/vendor.tar`. Use `just build-vendored` to build
+offline from that archive. On Linux x86_64, `just appimage` builds the release
+assets in `dist/` with `curl`, `desktop-file-utils`, and `zsync` installed.

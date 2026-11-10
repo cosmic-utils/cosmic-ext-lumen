@@ -134,7 +134,7 @@ impl App {
         if self.feed.api().is_none() && !self.feed.has_startup_preview() {
             let mut welcome = widget::column::with_capacity(3)
                 .spacing(space.space_s)
-                .push(widget::text::title1(crate::APP_NAME));
+                .push(widget::text::title1(crate::i18n::app_title()));
             if self.accounts.busy {
                 welcome = welcome.push(widget::text::body("Restoring account…"));
             } else {

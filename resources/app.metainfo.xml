@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.edfloreshz.Lumen</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <name>Lumen</name>
+  <summary>Browse Lemmy communities and discussions</summary>
+  <description>
+    <p>Lumen is a Lemmy client for the COSMIC desktop. Search communities across
+    the Fediverse, follow discussions, and publish posts from one window.</p>
+  </description>
+  <url type="homepage">https://github.com/cosmic-utils/cosmic-ext-lemmy</url>
+  <url type="vcs-browser">https://github.com/cosmic-utils/cosmic-ext-lemmy</url>
+  <launchable type="desktop-id">dev.edfloreshz.Lumen.desktop</launchable>
+  <provides>
+    <id>com.system76.CosmicApplication</id>
+    <binary>cosmic-ext-lumen</binary>
+  </provides>
+  <categories>
+    <category>Network</category>
+    <category>News</category>
+  </categories>
+  <keywords>
+    <keyword>Lemmy</keyword>
+    <keyword>Fediverse</keyword>
+    <keyword>COSMIC</keyword>
+  </keywords>
+</component>

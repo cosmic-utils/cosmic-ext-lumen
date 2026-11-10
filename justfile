@@ -1,3 +1,10 @@
+name := "cosmic-ext-lumen"
+appid := "dev.edfloreshz.Lumen"
+cargo-target-dir := env_var_or_default("CARGO_TARGET_DIR", "target")
+desktop := "target/xdgen" / (appid + ".desktop")
+metainfo := "target/xdgen" / (appid + ".metainfo.xml")
+icon := "resources/icons/hicolor/scalable/apps/icon.svg"
+
 default: run
 
 run:
@@ -10,13 +17,60 @@ check:
 test:
     cargo test --locked
 
-build:
-    cargo build --locked --release
+build: build-release
 
-install prefix=(env("HOME") / ".local"): build
-    install -Dm755 target/release/cosmic-ext-lumen "{{prefix}}/bin/cosmic-ext-lumen"
-    install -Dm644 resources/dev.edfloreshz.Lumen.desktop "{{prefix}}/share/applications/dev.edfloreshz.Lumen.desktop"
-    install -Dm644 resources/icon.svg "{{prefix}}/share/icons/hicolor/scalable/apps/dev.edfloreshz.Lumen.svg"
+build-debug *args:
+    cargo build --locked --target-dir "{{cargo-target-dir}}" {{args}}
+
+build-release *args: (build-debug "--release" args)
+
+check-json:
+    cargo clippy --locked --all-targets --message-format=json -- -D warnings
+
+clean:
+    cargo clean
+
+install prefix=(env_var("HOME") / ".local"): build-release
+    install -Dm755 "{{cargo-target-dir}}/release/{{name}}" "{{prefix}}/bin/{{name}}"
+    install -Dm644 "{{desktop}}" "{{prefix}}/share/applications/{{appid}}.desktop"
+    install -Dm644 "{{metainfo}}" "{{prefix}}/share/metainfo/{{appid}}.metainfo.xml"
+    install -Dm644 "{{icon}}" "{{prefix}}/share/icons/hicolor/scalable/apps/{{appid}}.svg"
+
+uninstall prefix=(env_var("HOME") / ".local"):
+    rm -f -- "{{prefix}}/bin/{{name}}" \
+      "{{prefix}}/share/applications/{{appid}}.desktop" \
+      "{{prefix}}/share/metainfo/{{appid}}.metainfo.xml" \
+      "{{prefix}}/share/icons/hicolor/scalable/apps/{{appid}}.svg"
+
+# Save vendored sources and their Cargo configuration together.
+vendor:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    project="$PWD"
+    mkdir -p target
+    work=$(mktemp -d "$project/target/vendor.XXXXXX")
+    trap 'rm -rf -- "$work"' EXIT
+    cd "$work"
+    mkdir .cargo
+    # Keep the xml crate directory distinct from the XML specs used by atspi.
+    cargo vendor --locked --versioned-dirs --manifest-path "$project/Cargo.toml" vendor > .cargo/config.toml
+    tar -cf vendor.tar .cargo/config.toml vendor
+    mv vendor.tar "$project/target/vendor.tar"
+
+# Use the bundle without installing a Cargo configuration in the checkout.
+build-vendored:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    project="$PWD"
+    target_dir=$(realpath -m -- "{{cargo-target-dir}}")
+    work=$(mktemp -d "$project/target/vendor.XXXXXX")
+    trap 'rm -rf -- "$work"' EXIT
+    tar -xf "$project/target/vendor.tar" -C "$work"
+    cd "$work"
+    cargo build --manifest-path "$project/Cargo.toml" --target-dir "$target_dir" --release --frozen
+
+clean-vendor:
+    rm -f -- target/vendor.tar
 
 # Build the AppImage, zsync metadata, and checksums under dist.
 appimage:
@@ -24,7 +78,6 @@ appimage:
     set -euo pipefail
     export ARCH=x86_64
     APPIMAGE=Lumen-x86_64.AppImage
-    app_id=dev.edfloreshz.Lumen
     repository="${GITHUB_REPOSITORY:-cosmic-utils/cosmic-ext-lemmy}"
 
     if [[ "$(uname -sm)" != "Linux x86_64" ]]; then
@@ -51,14 +104,15 @@ appimage:
     echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  $tools/appimagetool" | sha256sum --check
     chmod +x "$tools/linuxdeploy" "$tools/appimagetool"
 
-    target_dir="${CARGO_TARGET_DIR:-target}"
+    target_dir="{{cargo-target-dir}}"
     cargo build --locked --release --target-dir "$target_dir"
-    install -Dm644 resources/icon.svg "$tools/$app_id.svg"
-    desktop-file-validate "resources/$app_id.desktop"
+    install -Dm644 "{{metainfo}}" "$tools/AppDir/usr/share/metainfo/{{appid}}.metainfo.xml"
+    install -Dm644 "{{icon}}" "$tools/{{appid}}.svg"
+    desktop-file-validate "{{desktop}}"
     APPIMAGE_EXTRACT_AND_RUN=1 "$tools/linuxdeploy" --appdir "$tools/AppDir" \
-      --executable "$target_dir/release/cosmic-ext-lumen" \
-      --desktop-file "resources/$app_id.desktop" \
-      --icon-file "$tools/$app_id.svg"
+      --executable "$target_dir/release/{{name}}" \
+      --desktop-file "{{desktop}}" \
+      --icon-file "$tools/{{appid}}.svg"
 
     cd "$tools"
     update_info="gh-releases-zsync|${repository%/*}|${repository#*/}|latest|${APPIMAGE}.zsync"

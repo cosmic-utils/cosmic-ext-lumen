@@ -148,10 +148,10 @@ impl cosmic::Application for App {
             focused: false,
             compact: false,
         };
-        app.set_header_title(crate::APP_NAME.into());
+        app.set_header_title(crate::i18n::app_title());
         app.rebuild_nav();
         let title = app.core.main_window_id().map_or_else(Task::none, |id| {
-            app.set_window_title(crate::APP_NAME.into(), id)
+            app.set_window_title(crate::i18n::app_title(), id)
         });
         let preview = app
             .accounts
