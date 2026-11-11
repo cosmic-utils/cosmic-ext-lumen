@@ -1,4 +1,5 @@
 use super::{Feed, Message, Scope, SearchKind, Sort};
+use crate::fl;
 use crate::{
     features::post::render_markdown,
     shared::{
@@ -58,40 +59,41 @@ impl Feed {
         if let Some(error) = &self.error {
             content = content.push(widget::text::body(error));
             if empty && !self.has_more() {
-                content = content.push(button::standard("Retry").on_press(Message::Refresh));
+                content = content.push(button::standard(fl!("retry")).on_press(Message::Refresh));
                 if reference {
-                    content = content
-                        .push(button::text("Search as keywords").on_press(Message::SearchKeywords));
+                    content = content.push(
+                        button::text(fl!("search-as-keywords")).on_press(Message::SearchKeywords),
+                    );
                 }
             }
         }
         if empty && self.error.is_none() {
             let message = if self.busy {
                 if reference {
-                    "Opening link or handle…"
+                    fl!("link-opening")
                 } else if comments {
-                    "Loading comments…"
+                    fl!("loading-comments")
                 } else if communities {
-                    "Loading communities…"
+                    fl!("loading-communities")
                 } else if people {
-                    "Loading people…"
+                    fl!("loading-people")
                 } else {
-                    "Loading posts…"
+                    fl!("loading-posts")
                 }
             } else if self.loaded {
                 match self.scope {
-                    Scope::Saved if comments => "No saved comments.",
-                    Scope::Saved => "No saved posts.",
-                    Scope::Search if comments => "No matching comments.",
-                    Scope::Search if communities => "No matching communities.",
-                    Scope::Search if people => "No matching people.",
-                    Scope::Profile(_) if comments => "No comments on this profile.",
-                    Scope::Profile(_) => "No posts on this profile.",
-                    Scope::Search => "No matching posts.",
-                    _ => "No posts in this feed.",
+                    Scope::Saved if comments => fl!("saved-no-comments"),
+                    Scope::Saved => fl!("saved-no-posts"),
+                    Scope::Search if comments => fl!("search-no-comments"),
+                    Scope::Search if communities => fl!("search-no-communities"),
+                    Scope::Search if people => fl!("search-no-people"),
+                    Scope::Profile(_) if comments => fl!("profile-no-comments"),
+                    Scope::Profile(_) => fl!("profile-no-posts"),
+                    Scope::Search => fl!("search-no-posts"),
+                    _ => fl!("feed-empty"),
                 }
             } else {
-                "Connect to an instance to start reading."
+                fl!("instance-connect-prompt")
             };
             content = content
                 .push(widget::container(widget::text::body(message)).padding(space.space_xs));
@@ -157,11 +159,11 @@ impl Feed {
         }
         for comment in &self.comments {
             let label = if comment.comment.deleted {
-                "[deleted]"
+                fl!("comment-deleted").into()
             } else if comment.comment.removed {
-                "[removed]"
+                fl!("comment-removed").into()
             } else {
-                &comment.comment.content
+                std::borrow::Cow::Borrowed(comment.comment.content.as_str())
             };
             let card = widget::column::with_capacity(3)
                 .spacing(space.space_xxxs)
@@ -171,10 +173,10 @@ impl Feed {
                         .spacing(space.space_xxxs)
                         .push(media.person_avatar(&comment.creator).icon().size(16))
                         .push(
-                            widget::text::caption(format!(
-                                "{} · {}",
-                                comment.creator.name,
-                                community_label(&comment.community)
+                            widget::text::caption(fl!(
+                                "feed-comment-metadata",
+                                author = comment.creator.name.as_str(),
+                                community = community_label(&comment.community)
                             ))
                             .wrapping(Wrapping::WordOrGlyph),
                         ),
@@ -247,15 +249,15 @@ impl Feed {
         if self.has_more() {
             content = content.push(
                 button::standard(if self.busy {
-                    "Loading…"
+                    fl!("loading")
                 } else if comments {
-                    "Load more comments"
+                    fl!("load-more-comments")
                 } else if communities {
-                    "Load more communities"
+                    fl!("load-more-communities")
                 } else if people {
-                    "Load more people"
+                    fl!("load-more-people")
                 } else {
-                    "Load more posts"
+                    fl!("load-more-posts")
                 })
                 .on_press_maybe((!self.busy).then_some(Message::More)),
             );
@@ -268,12 +270,17 @@ impl Feed {
                 widget::row::with_capacity(2)
                     .spacing(space.space_xxs)
                     .push(widget::dropdown(
-                        &["Posts", "Comments", "Communities", "People"][..],
+                        vec![
+                            fl!("posts"),
+                            fl!("comments"),
+                            fl!("communities"),
+                            fl!("people"),
+                        ],
                         Some(self.search_type.index()),
                         Message::SearchKind,
                     ));
             if self.search_type.supports_community() && !self.search_communities.is_empty() {
-                let mut labels = vec!["All communities".to_owned()];
+                let mut labels = vec![fl!("all-communities")];
                 labels.extend(self.search_communities.iter().map(community_label));
                 let selected = self
                     .search_communities
@@ -353,21 +360,21 @@ impl Feed {
             && (self.scope != Scope::Search || self.search_type.supports_community());
         if self.scope == Scope::Saved {
             dropdowns = dropdowns.push(widget::dropdown(
-                &["Posts", "Comments"][..],
+                vec![fl!("posts"), fl!("comments")],
                 Some(usize::from(self.viewing_saved_comments())),
                 Message::SavedTab,
             ));
         }
         if profile {
             dropdowns = dropdowns.push(widget::dropdown(
-                &["Posts", "Comments"][..],
+                vec![fl!("posts"), fl!("comments")],
                 Some(usize::from(self.profile_comments)),
                 Message::ProfileTab,
             ));
         }
         if show_sort {
             dropdowns = dropdowns.push(widget::dropdown(
-                Sort::LABELS.as_slice(),
+                Sort::labels(),
                 Some(self.sort.index()),
                 Message::Sort,
             ));
@@ -377,15 +384,15 @@ impl Feed {
             .align_y(Alignment::Center);
         controls = controls.push(
             button::icon(icon::from_name("view-refresh-symbolic"))
-                .tooltip("Refresh feed")
+                .tooltip(fl!("refresh-feed"))
                 .on_press_maybe((!self.busy && self.api.is_some()).then_some(Message::Refresh)),
         );
         controls = controls.push(
             button::icon(icon::from_name("view-list-symbolic"))
                 .tooltip(if compact {
-                    "Comfortable feed spacing"
+                    fl!("feed-spacing-comfortable")
                 } else {
-                    "Compact feed spacing"
+                    fl!("feed-spacing-compact")
                 })
                 .class(toggle_button_class(compact, button::ButtonClass::Icon))
                 .on_press(Message::ToggleDensity),
@@ -393,14 +400,14 @@ impl Feed {
         if let Scope::Community(id) = self.scope {
             controls = controls.push(
                 button::icon(icon::from_name("dialog-information-symbolic"))
-                    .tooltip("Community details")
+                    .tooltip(fl!("community-details"))
                     .on_press(Message::CommunityDetails(id)),
             );
         }
         if let Some(person) = self.profile() {
             controls = controls.push(
                 button::icon(icon::from_name("web-browser-symbolic"))
-                    .tooltip("Open profile in browser")
+                    .tooltip(fl!("profile-open-browser"))
                     .on_press(Message::OpenLink(person.actor_id.to_string())),
             );
         }

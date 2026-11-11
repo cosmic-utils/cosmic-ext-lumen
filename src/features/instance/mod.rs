@@ -1,4 +1,4 @@
-//! Connect to an instance and remember the last successful connection.
+use crate::fl;
 mod settings;
 mod view;
 
@@ -58,9 +58,9 @@ impl Instance {
                                 async move {
                                     let response: GetSiteResponse = api.get("site", &()).await?;
                                     if !response.version.starts_with("0.19.") {
-                                        return Err(format!(
-                                            "This instance runs Lemmy {}. This reader currently supports 0.19.x (API v3).",
-                                            response.version
+                                        return Err(fl!(
+                                            "instance-version-unsupported",
+                                            version = response.version
                                         ));
                                     }
                                     Ok((api, response.site_view.site.name))

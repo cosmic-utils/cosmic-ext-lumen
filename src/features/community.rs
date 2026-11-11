@@ -1,3 +1,4 @@
+use crate::fl;
 use crate::shared::api::{Api, Freshness};
 use lemmy_api_common::{
     community::{FollowCommunity, GetCommunity, GetCommunityResponse},
@@ -17,7 +18,7 @@ pub async fn get(api: &Api, id: CommunityId) -> Result<CommunityView, String> {
         )
         .await?;
     if result.community_view.community.id != id {
-        return Err("The instance returned a different community.".into());
+        return Err(fl!("community-mismatch"));
     }
     Ok(result.community_view)
 }
@@ -33,7 +34,7 @@ pub async fn follow(api: Api, id: CommunityId, follow: bool) -> Result<Community
         )
         .await?;
     if result.community_view.community.id != id {
-        return Err("The instance returned a different community.".into());
+        return Err(fl!("community-mismatch"));
     }
     Ok(result.community_view)
 }

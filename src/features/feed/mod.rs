@@ -1,4 +1,4 @@
-//! Post feeds, sorting, pagination, and selection.
+use crate::fl;
 mod service;
 mod view;
 pub use view::SCROLL_ID;
@@ -32,7 +32,9 @@ pub enum Sort {
     TopDay,
 }
 impl Sort {
-    pub const LABELS: [&str; 4] = ["Hot", "New", "Active", "Top today"];
+    pub fn labels() -> Vec<String> {
+        vec![fl!("hot"), fl!("new"), fl!("active"), fl!("top-today")]
+    }
     pub fn index(self) -> usize {
         match self {
             Self::Hot => 0,
@@ -554,7 +556,7 @@ impl Feed {
         let response = match result {
             Ok(response) => response,
             Err(error) => {
-                self.error = Some(format!("Could not open this link or handle. {error}"));
+                self.error = Some(fl!("reference-open-failed", error = error.to_string()));
                 return None;
             }
         };
@@ -573,7 +575,7 @@ impl Feed {
         } else if let Some(person) = &response.person {
             Message::OpenPerson(person.person.id)
         } else {
-            self.error = Some("The instance found no match for this link or handle.".into());
+            self.error = Some(fl!("reference-not-found"));
             return None;
         };
         self.loaded = true;
@@ -730,7 +732,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn keeps_startup_snapshot_visible_until_the_live_feed_arrives() {
+    async fn startup_snapshot() {
         let mut cached = post_view();
         cached.post.name = "Cached title".into();
         let mut fresh = cached.clone();
@@ -763,7 +765,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn saved_feed_uses_the_selected_account_and_discards_old_pages() {
+    async fn saved_feed_pages() {
         let mut first_post = post_view();
         first_post.saved = true;
         let mut second_post = first_post.clone();
@@ -813,7 +815,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn saved_comments_are_account_scoped_and_open_their_discussion() {
+    async fn saved_comments() {
         let post = post_view();
         let mut comment = comment_view(&post, "Saved reply");
         comment.saved = true;
@@ -843,7 +845,7 @@ mod tests {
     }
 
     #[test]
-    fn ignores_response_from_previous_feed() {
+    fn stale_feed_response() {
         let mut feed = Feed {
             generation: 2,
             busy: true,
@@ -855,7 +857,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn searches_all_communities_and_keeps_results_openable() {
+    async fn community_search() {
         let post = post_view();
         let body = json!({
             "type_": "Posts",
@@ -888,7 +890,7 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn comment_search_uses_the_selected_community_and_ignores_stale_results() {
+    async fn comment_search_scope() {
         let post = post_view();
         let mut comment = comment_view(&post, "A matching comment");
         comment.saved = false;
@@ -924,7 +926,7 @@ mod tests {
         assert!(feed.busy);
     }
     #[tokio::test]
-    async fn people_search_opens_profile_post_and_comment_history() {
+    async fn people_search() {
         let post = post_view();
         let comment = comment_view(&post, "Author's comment");
         let person = json!({
@@ -991,7 +993,7 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn federated_reference_opens_the_resolved_item_for_the_active_instance() {
+    async fn reference_resolution() {
         let post = post_view();
         let url = "https://remote.example/post/200";
         let body = json!({"post": post}).to_string();
@@ -1018,7 +1020,7 @@ mod tests {
     }
 
     #[test]
-    fn distinguishes_federated_references_from_keywords() {
+    fn reference_detection() {
         for query in [
             "https://remote.example/comment/12",
             "!community@remote.example",

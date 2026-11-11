@@ -8,6 +8,7 @@ repository = "https://github.com/cosmic-utils/cosmic-ext-lemmy"
 
 [dependencies]
 i18n-embed = { version = "0.16", features = ["fluent-system", "desktop-requester"] }
+i18n-embed-fl = "0.10"
 rust-embed = "8"
 libcosmic = { git = "https://github.com/pop-os/libcosmic", features = ["markdown", "wgpu", "xdg-portal"] }
 lemmy_api_common = { version = "=0.19.21", default-features = false }

@@ -1,4 +1,3 @@
-//! Application shell and cross-feature navigation.
 mod navigation;
 mod view;
 

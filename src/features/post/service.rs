@@ -1,4 +1,5 @@
 use super::{Action, CommentAction, CommentTarget};
+use crate::fl;
 use crate::shared::api::{Api, Freshness};
 use lemmy_api_common::{
     comment::{
@@ -50,7 +51,7 @@ pub async fn create_comment(
         )
         .await?;
     if response.comment_view.comment.post_id != post_id {
-        return Err("The instance returned a comment for a different post.".into());
+        return Err(fl!("comment-post-mismatch"));
     }
     if let Some(parent_id) = parent_id
         && response
@@ -62,7 +63,7 @@ pub async fn create_comment(
             .and_then(|id| id.parse().ok())
             != Some(parent_id.0)
     {
-        return Err("The instance returned a reply to a different comment.".into());
+        return Err(fl!("reply-parent-mismatch"));
     }
     Ok(response.comment_view)
 }
@@ -96,12 +97,12 @@ pub async fn act(api: Api, post: &PostView, action: Action) -> Result<PostView, 
         }
     };
     if response.post_view.post.id != post_id {
-        return Err("The instance returned a different post.".into());
+        return Err(fl!("post-mismatch"));
     }
     if let Action::SetDeleted(deleted) = action
         && response.post_view.post.deleted != deleted
     {
-        return Err("The instance did not confirm the requested post status.".into());
+        return Err(fl!("post-status-unconfirmed"));
     }
     Ok(response.post_view)
 }
@@ -173,7 +174,7 @@ fn checked_comment(
     if response.comment_view.comment.id != comment_id
         || response.comment_view.comment.post_id != post_id
     {
-        return Err("The instance returned a different comment.".into());
+        return Err(fl!("comment-mismatch"));
     }
     Ok(response.comment_view)
 }
@@ -190,7 +191,7 @@ pub async fn get_post(api: &Api, id: PostId) -> Result<PostView, String> {
         )
         .await?;
     if response.post_view.post.id != id {
-        return Err("The instance returned a different post.".into());
+        return Err(fl!("post-mismatch"));
     }
     Ok(response.post_view)
 }

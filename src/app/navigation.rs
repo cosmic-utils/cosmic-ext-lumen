@@ -1,4 +1,5 @@
 use super::{App, Destination, Drawer, Message, NavItem};
+use crate::fl;
 use crate::{
     features::{feed, inbox, post, publish},
     shared::{api::Api, cache::Cache, media, presentation::community_title},
@@ -532,10 +533,18 @@ impl App {
         let scope = self.feed.scope();
         let signed_in = self.feed.signed_in() || self.startup_navigation.is_some();
         for (item, text, image) in [
-            (feed::Scope::All, "All posts", "network-workgroup-symbolic"),
-            (feed::Scope::Local, "Local", "network-server-symbolic"),
-            (feed::Scope::Subscribed, "Subscribed", "view-list-symbolic"),
-            (feed::Scope::Saved, "Saved", "user-bookmarks-symbolic"),
+            (
+                feed::Scope::All,
+                fl!("all-posts"),
+                "network-workgroup-symbolic",
+            ),
+            (feed::Scope::Local, fl!("local"), "network-server-symbolic"),
+            (
+                feed::Scope::Subscribed,
+                fl!("subscribed"),
+                "view-list-symbolic",
+            ),
+            (feed::Scope::Saved, fl!("saved"), "user-bookmarks-symbolic"),
         ] {
             if !signed_in && matches!(item, feed::Scope::Subscribed | feed::Scope::Saved) {
                 continue;
@@ -560,9 +569,9 @@ impl App {
                 .as_ref()
                 .map_or(self.inbox.unread, |cached| cached.unread);
             let title = if unread > 0 {
-                format!("Inbox ({unread})")
+                fl!("inbox-unread", count = unread)
             } else {
-                "Inbox".into()
+                fl!("inbox")
             };
             let entry = nav
                 .insert()
@@ -612,7 +621,7 @@ mod tests {
     use cosmic::iced::{futures::StreamExt, runtime};
 
     #[tokio::test]
-    async fn navigation_preview_loads_communities_and_badge_for_one_account() {
+    async fn navigation_preview() {
         let instance = "https://example.com";
         let account = uuid::Uuid::new_v4().to_string();
         let scope = Api::account_cache_scope(instance, &account).unwrap();

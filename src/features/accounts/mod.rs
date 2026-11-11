@@ -1,3 +1,4 @@
+use crate::fl;
 mod storage;
 use crate::shared::{api::Api, cache::Cache, media::Media};
 use cosmic::{
@@ -112,7 +113,7 @@ impl Accounts {
                 let id = account.id.clone();
                 let token = tokio::task::spawn_blocking(move || storage::read_token(&id))
                     .await
-                    .map_err(|_| "Credential worker failed".to_string())??;
+                    .map_err(|_| fl!("credential-worker-failed"))??;
                 let api = Api::new(http, &account.instance)?.authenticated(token);
                 let (person, follows) = validate(&api).await?;
                 let person_id = person.id;
@@ -147,7 +148,7 @@ impl Accounts {
                         Some("localhost" | "127.0.0.1" | "[::1]")
                     )
                 {
-                    self.error = Some("Login requires HTTPS (except localhost).".into());
+                    self.error = Some(fl!("auth-https-required"));
                     return (Task::none(), None);
                 }
                 self.busy = true;
@@ -166,10 +167,7 @@ impl Accounts {
                     Task::perform(
                         async move {
                             let response: LoginResponse = api.post("user/login", &login).await?;
-                            let token = response
-                                .jwt
-                                .ok_or("No session token returned")?
-                                .into_inner();
+                            let token = response.jwt.ok_or(fl!("auth-no-token"))?.into_inner();
                             let api = api.authenticated(token.clone());
                             let (person, follows) = validate(&api).await?;
                             let person_id = person.id;
@@ -189,7 +187,7 @@ impl Accounts {
                             let id = account.id.clone();
                             tokio::task::spawn_blocking(move || storage::write_token(&id, &token))
                                 .await
-                                .map_err(|_| "Credential worker failed".to_string())??;
+                                .map_err(|_| fl!("credential-worker-failed"))??;
                             Ok(Session {
                                 account,
                                 api,
@@ -246,13 +244,19 @@ impl Accounts {
                         Task::perform(
                             async move {
                                 let warning = if let Some(api) = &session {
-                                    api.post::<_, lemmy_api_common::SuccessResponse>("user/logout", &serde_json::json!({})).await.err().map(|_| "Removed locally; server session could not be revoked. Revoke it from Lemmy settings.".to_owned())
+                                    api.post::<_, lemmy_api_common::SuccessResponse>(
+                                        "user/logout",
+                                        &serde_json::json!({}),
+                                    )
+                                    .await
+                                    .err()
+                                    .map(|_| fl!("session-revoke-failed"))
                                 } else {
                                     None
                                 };
                                 tokio::task::spawn_blocking(move || storage::delete_token(&id))
                                     .await
-                                    .map_err(|_| "Credential worker failed".to_string())??;
+                                    .map_err(|_| fl!("credential-worker-failed"))??;
                                 if let Some(api) = session {
                                     api.invalidate_reading_cache().await;
                                     if let Some(scope) = api.reading_scope() {
@@ -357,17 +361,18 @@ impl Accounts {
             picker = picker.push(b.width(Length::Fill));
         }
         if !self.busy {
-            picker = picker.push(widget::button::text("Anonymous").on_press(Message::Anonymous));
+            picker =
+                picker.push(widget::button::text(fl!("anonymous")).on_press(Message::Anonymous));
             if self.registry.active.is_some() {
-                picker =
-                    picker.push(widget::button::text("Remove account").on_press(Message::Remove));
+                picker = picker
+                    .push(widget::button::text(fl!("remove-account")).on_press(Message::Remove));
             }
         }
         content = content.push(picker);
         let mut login = widget::button::suggested(if self.busy {
-            "Working…"
+            fl!("working")
         } else {
-            "Add account"
+            fl!("add-account")
         });
         if !self.busy {
             login = login.on_press(Message::Login)
@@ -376,14 +381,17 @@ impl Accounts {
             widget::column::with_capacity(4)
                 .spacing(8)
                 .push(
-                    widget::text_input("Username or email", &self.username)
+                    widget::text_input(fl!("username-or-email"), &self.username)
                         .on_input(Message::Username),
                 )
                 .push(
-                    widget::text_input::secure_input("Password", &self.password, None, true)
+                    widget::text_input::secure_input(fl!("password"), &self.password, None, true)
                         .on_input(Message::Password),
                 )
-                .push(widget::text_input("2FA code (optional)", &self.code).on_input(Message::Code))
+                .push(
+                    widget::text_input(fl!("auth-2fa-optional"), &self.code)
+                        .on_input(Message::Code),
+                )
                 .push(login),
         );
         if let Some(e) = &self.error {
@@ -395,7 +403,7 @@ impl Accounts {
 async fn validate(api: &Api) -> Result<(Person, Vec<Community>), String> {
     let site: GetSiteResponse = api.get("site", &()).await?;
     if !site.version.starts_with("0.19.") {
-        return Err("Requires Lemmy 0.19.x".into());
+        return Err(fl!("instance-version-required"));
     }
     site.my_user
         .map(|u| {
@@ -407,7 +415,7 @@ async fn validate(api: &Api) -> Result<(Person, Vec<Community>), String> {
                     .collect(),
             )
         })
-        .ok_or("Session expired; log in again.".into())
+        .ok_or(fl!("session-expired"))
 }
 
 impl std::fmt::Debug for Message {
@@ -420,14 +428,14 @@ impl std::fmt::Debug for Message {
 mod tests {
     use super::*;
     #[test]
-    fn secrets_are_redacted() {
+    fn secret_redaction() {
         assert!(
             !format!("{:?}", Message::Password("secret-password".into()))
                 .contains("secret-password")
         );
     }
     #[test]
-    fn registry_contains_only_metadata() {
+    fn registry_metadata() {
         let r = Registry {
             accounts: vec![Account {
                 id: "a".into(),

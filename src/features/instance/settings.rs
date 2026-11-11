@@ -1,3 +1,4 @@
+use crate::fl;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -23,7 +24,7 @@ pub fn load() -> (String, Option<String>) {
         Ok(instance) => (instance, None),
         Err(error) => (
             "lemmy.world".into(),
-            Some(format!("Could not load settings: {error}")),
+            Some(fl!("settings-load-failed", error = error.to_string())),
         ),
     }
 }
@@ -31,7 +32,7 @@ pub fn load() -> (String, Option<String>) {
 pub fn save(instance: &str) -> Result<(), String> {
     let result = (|| {
         let path = path()?;
-        std::fs::create_dir_all(path.parent().ok_or("Missing settings directory")?)
+        std::fs::create_dir_all(path.parent().ok_or(fl!("settings-dir-missing"))?)
             .map_err(|e| e.to_string())?;
         let data = serde_json::to_vec_pretty(&Settings {
             instance: instance.into(),
@@ -41,5 +42,5 @@ pub fn save(instance: &str) -> Result<(), String> {
         std::fs::write(&temporary, data).map_err(|e| e.to_string())?;
         std::fs::rename(temporary, path).map_err(|e| e.to_string())
     })();
-    result.map_err(|e| format!("Connected, but could not save the instance: {e}"))
+    result.map_err(|e| fl!("instance-save-failed", error = e.to_string()))
 }

@@ -1,4 +1,4 @@
-//! Compose, edit, and cross-post with local drafts.
+use crate::fl;
 mod drafts;
 mod upload;
 
@@ -103,9 +103,9 @@ impl Publish {
     }
 
     pub fn open_cross(&mut self, account: &str, source: &PostView) {
-        let attribution = format!(
-            "Cross-posted from [the original discussion]({})",
-            source.post.ap_id
+        let attribution = fl!(
+            "cross-post-attribution",
+            link = format!("[{}]({})", fl!("cross-post-original"), source.post.ap_id)
         );
         let body = source
             .post
@@ -166,11 +166,15 @@ impl Publish {
                 match local::read(&path) {
                     Ok(Some(saved)) => draft = saved,
                     Ok(None) => {}
-                    Err(error) => self.draft_error = Some(format!("Could not open draft: {error}")),
+                    Err(error) => {
+                        self.draft_error = Some(fl!("draft-open-failed", error = error.to_string()))
+                    }
                 }
                 self.draft_path = Some(path);
             }
-            Err(error) => self.draft_error = Some(format!("Could not locate draft: {error}")),
+            Err(error) => {
+                self.draft_error = Some(fl!("draft-not-found", error = error.to_string()))
+            }
         }
         self.community = draft.community;
         self.manual_community = draft.manual_community;
@@ -196,7 +200,7 @@ impl Publish {
         };
         self.draft_error = local::write(path, &draft)
             .err()
-            .map(|error| format!("Could not save draft: {error}"));
+            .map(|error| fl!("draft-save-failed", error = error.to_string()));
     }
 
     fn remove_draft(&self) -> Result<(), std::io::Error> {
@@ -228,10 +232,9 @@ impl Publish {
                 self.busy = false;
                 match result {
                     Ok(post) => {
-                        let draft_error = self
-                            .remove_draft()
-                            .err()
-                            .map(|error| format!("Could not remove the published draft: {error}"));
+                        let draft_error = self.remove_draft().err().map(|error| {
+                            fl!("draft-published-remove-failed", error = error.to_string())
+                        });
                         *self = Self {
                             draft_error,
                             ..Self::default()
@@ -261,7 +264,9 @@ impl Publish {
             }
             Message::Discard => match self.remove_draft() {
                 Ok(()) => *self = Self::default(),
-                Err(error) => self.draft_error = Some(format!("Could not discard draft: {error}")),
+                Err(error) => {
+                    self.draft_error = Some(fl!("draft-discard-failed", error = error.to_string()))
+                }
             },
             Message::TogglePreview => {
                 self.preview = if self.preview.is_none() {
@@ -330,7 +335,7 @@ impl Publish {
                 };
                 let url = self.url.trim();
                 if !url.is_empty() && !crate::shared::media::web_url(url) {
-                    self.error = Some("Enter a valid HTTP or HTTPS link.".into());
+                    self.error = Some(fl!("link-invalid"));
                     return (Task::none(), None);
                 }
                 let name = self.title.trim().to_owned();
@@ -415,9 +420,9 @@ impl Publish {
             media::image_view(image, Length::Fill, height).into()
         } else {
             let status = if media.preview_pending(url) {
-                "Loading image…"
+                fl!("loading-image")
             } else {
-                "Image preview unavailable."
+                fl!("image-preview-failed")
             };
             widget::container(widget::text::caption(status))
                 .center_x(Length::Fill)
@@ -446,24 +451,25 @@ impl Publish {
                 } else {
                     selected
                 };
-                choices.push("Other community…".into());
-                controls = controls.push(widget::text::body("Community")).push(
+                choices.push(fl!("other-community"));
+                controls = controls.push(widget::text::body(fl!("community"))).push(
                     widget::dropdown(choices, selected, Message::PickCommunity)
-                        .placeholder("Choose a community"),
+                        .placeholder(fl!("community-choose")),
                 );
                 manual
             };
             if manual {
-                let input = widget::text_input("Community name or name@instance", &self.community)
-                    .on_input(Message::Community);
+                let input =
+                    widget::text_input(fl!("community-handle-placeholder"), &self.community)
+                        .on_input(Message::Community);
                 controls = controls.push(if follows.is_empty() {
-                    input.label("Community")
+                    input.label(fl!("community"))
                 } else {
                     input
                 });
             }
         }
-        let editor = crate::shared::presentation::text_editor(&self.body, "Write in Markdown")
+        let editor = crate::shared::presentation::text_editor(&self.body, fl!("write-in-markdown"))
             .height(Length::Fixed(110.0));
         let editor = if self.busy {
             editor
@@ -471,8 +477,8 @@ impl Publish {
             editor.on_action(Message::Body)
         };
         controls = controls.push(
-            widget::text_input("Post title", &self.title)
-                .label("Title")
+            widget::text_input(fl!("post-title"), &self.title)
+                .label(fl!("title"))
                 .on_input(Message::Title),
         );
         let image_url = self.image_url();
@@ -481,16 +487,16 @@ impl Publish {
         } else {
             controls = controls.push(
                 widget::text_input("https://", &self.url)
-                    .label("Link or image URL (optional)")
+                    .label(fl!("post-url-placeholder"))
                     .on_input(Message::Url),
             );
         }
         let upload_label = if self.uploading {
-            "Uploading…"
+            fl!("uploading")
         } else if image_url.is_some() {
-            "Replace image…"
+            fl!("replace-image")
         } else {
-            "Upload image…"
+            fl!("upload-image")
         };
         let mut image_actions = widget::row::with_capacity(2).spacing(space.space_xxs).push(
             button::standard(upload_label)
@@ -498,19 +504,19 @@ impl Publish {
         );
         if image_url.is_some() {
             image_actions = image_actions.push(
-                button::text("Remove image")
+                button::text(fl!("remove-image"))
                     .on_press_maybe((!self.busy).then_some(Message::RemoveImage)),
             );
             controls = controls.push(image_actions).push(
-                widget::text_input("Describe the image", &self.alt_text)
-                    .label("Image description (optional)")
+                widget::text_input(fl!("image-description"), &self.alt_text)
+                    .label(fl!("image-description-optional"))
                     .on_input(Message::AltText),
             );
         } else {
             controls = controls.push(image_actions);
         }
         controls
-            .push(widget::text::body("Body"))
+            .push(widget::text::body(fl!("body")))
             .push(editor)
             .into()
     }
@@ -535,9 +541,9 @@ impl Publish {
         let title = self.title.trim();
         content = content.push(
             widget::text::title2(if title.is_empty() {
-                "Untitled post"
+                fl!("untitled-post").into()
             } else {
-                title
+                std::borrow::Cow::Borrowed(title)
             })
             .wrapping(Wrapping::WordOrGlyph),
         );
@@ -567,9 +573,9 @@ impl Publish {
     pub fn view(&self, follows: &[Community], media: &Media) -> Element<'_, Message> {
         let space = cosmic::theme::active().cosmic().spacing;
         let title = match self.mode {
-            Mode::New => "New post",
-            Mode::Edit(_) => "Edit post",
-            Mode::Cross { .. } => "Cross-post",
+            Mode::New => fl!("new-post"),
+            Mode::Edit(_) => fl!("edit-post"),
+            Mode::Cross { .. } => fl!("cross-post"),
         };
         let header = widget::row::with_capacity(2)
             .align_y(Alignment::Center)
@@ -577,9 +583,9 @@ impl Publish {
             .push(widget::text::title3(title).width(Length::Fill))
             .push(
                 button::standard(if self.preview.is_some() {
-                    "Back to editing"
+                    fl!("back-to-editing")
                 } else {
-                    "Preview post"
+                    fl!("preview-post")
                 })
                 .on_press_maybe((!self.busy).then_some(Message::TogglePreview)),
             );
@@ -601,19 +607,20 @@ impl Publish {
             .control(widget::scrollable(controls).height(Length::Fill))
             .primary_action(
                 button::suggested(match (self.busy, self.editing(), self.uploading) {
-                    (true, _, true) => "Uploading…",
-                    (true, true, _) => "Saving…",
-                    (true, false, _) => "Publishing…",
-                    (false, true, _) => "Save changes",
-                    (false, false, _) => "Publish",
+                    (true, _, true) => fl!("uploading"),
+                    (true, true, _) => fl!("saving"),
+                    (true, false, _) => fl!("publishing"),
+                    (false, true, _) => fl!("save-changes"),
+                    (false, false, _) => fl!("publish"),
                 })
                 .on_press_maybe((!self.busy && self.can_submit()).then_some(Message::Submit)),
             )
             .secondary_action(
-                button::standard("Close").on_press_maybe((!self.busy).then_some(Message::Close)),
+                button::standard(fl!("close"))
+                    .on_press_maybe((!self.busy).then_some(Message::Close)),
             )
             .tertiary_action(
-                button::text("Discard draft")
+                button::text(fl!("discard-draft"))
                     .on_press_maybe((!self.busy).then_some(Message::Discard)),
             )
             .into()
@@ -643,12 +650,12 @@ async fn create(
         }
     };
     if Some(community_id) == source {
-        return Err("Choose a different community for the cross-post.".into());
+        return Err(fl!("cross-post-choose-community"));
     }
     form.community_id = community_id;
     let response: PostResponse = api.post("post", &form).await?;
     if response.post_view.post.community_id != community_id {
-        return Err("The instance returned a post in a different community.".into());
+        return Err(fl!("post-community-mismatch"));
     }
     Ok(response.post_view)
 }
@@ -656,7 +663,7 @@ async fn create(
 async fn edit(api: Api, form: EditPost) -> Result<PostView, String> {
     let response: PostResponse = api.put("post", &form).await?;
     if response.post_view.post.id != form.post_id {
-        return Err("The instance returned a different post.".into());
+        return Err(fl!("post-mismatch"));
     }
     Ok(response.post_view)
 }
@@ -669,7 +676,7 @@ mod tests {
     use serde_json::{Value, json};
 
     #[tokio::test]
-    async fn publishes_in_the_selected_community_and_preserves_a_failed_draft() {
+    async fn publish_draft() {
         let post = post_view();
         let follows = [post.community.clone()];
         let response = json!({"post_view": post}).to_string();
@@ -710,7 +717,7 @@ mod tests {
         }
     }
     #[test]
-    fn drafts_resume_after_restart_and_stay_separate_by_account_and_post() {
+    fn draft_persistence() {
         let account = uuid::Uuid::new_v4().to_string();
         let other = uuid::Uuid::new_v4().to_string();
         let post = post_view();
@@ -762,7 +769,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn edits_the_original_post_and_can_clear_its_optional_fields() {
+    async fn edit_post_fields() {
         let mut post = post_view();
         post.post.name = "Updated title".into();
         let response = json!({"post_view": post}).to_string();
@@ -798,7 +805,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cross_post_uses_a_different_community_and_links_the_original() {
+    async fn cross_post() {
         let source = post_view();
         let mut created = source.clone();
         created.community.id = CommunityId(3);
@@ -848,7 +855,7 @@ mod tests {
             body["body"]
                 .as_str()
                 .unwrap()
-                .contains(source.post.ap_id.as_str())
+                .contains(&format!("[the original discussion]({})", source.post.ap_id))
         );
     }
 }

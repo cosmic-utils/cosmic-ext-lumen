@@ -18,7 +18,7 @@ pub fn hidden(path: &[i32], collapsed: &HashSet<i32>) -> bool {
 mod tests {
     use super::*;
     #[test]
-    fn orders_threads_numerically_and_hides_only_descendants() {
+    fn thread_order() {
         let mut paths = [path_ids("0.10"), path_ids("0.2.20"), path_ids("0.2")];
         paths.sort();
         assert_eq!(paths, [vec![2], vec![2, 20], vec![10]]);

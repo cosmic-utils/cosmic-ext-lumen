@@ -8,7 +8,7 @@ use lemmy_api_common::{
 
 #[tokio::test]
 #[ignore = "requires network access to a Lemmy 0.19.x instance"]
-async fn reads_instance_feed_and_comments() {
+async fn live_feed() {
     let instance =
         std::env::var("LEMMY_TEST_INSTANCE").unwrap_or_else(|_| "https://lemmy.world".into());
     let api = Api::new(http_client().unwrap(), &instance).unwrap();

@@ -1,4 +1,5 @@
 use super::cache::{self, Cache};
+use crate::fl;
 use reqwest::{Client, Method, Response};
 use serde::{Serialize, de::DeserializeOwned};
 use std::{
@@ -45,7 +46,7 @@ pub fn http_client() -> Result<Client, reqwest::Error> {
         .build()
 }
 
-/// Shared transport only. Each feature owns its endpoints and request types.
+/// Shared HTTP transport.
 #[derive(Clone)]
 pub struct Api {
     pub base: Url,
@@ -138,7 +139,7 @@ impl Api {
             files: Vec<UploadedFile>,
         }
 
-        let token = self.token.as_ref().ok_or("Sign in to upload images.")?;
+        let token = self.token.as_ref().ok_or(fl!("upload-sign-in-required"))?;
         let mut url = self.base.join("pictrs/image").map_err(|e| e.to_string())?;
         let part = reqwest::multipart::Part::bytes(bytes)
             .file_name(file)
@@ -151,17 +152,17 @@ impl Api {
             .multipart(reqwest::multipart::Form::new().part("images[]", part))
             .send()
             .await
-            .map_err(|e| format!("Could not upload image: {e}"))?;
+            .map_err(|e| fl!("upload-failed", error = e.to_string()))?;
         if !response.status().is_success() {
-            return Err(format!(
-                "The instance rejected the image (HTTP {}).",
-                response.status()
+            return Err(fl!(
+                "upload-http-error",
+                status = response.status().as_u16()
             ));
         }
         let result: Upload = response
             .json()
             .await
-            .map_err(|_| "Unexpected image upload response.")?;
+            .map_err(|_| fl!("upload-response-invalid"))?;
         let file = result
             .files
             .into_iter()
@@ -170,9 +171,9 @@ impl Api {
             .filter(|file| {
                 !file.is_empty() && file != "." && file != ".." && !file.contains(['/', '\\'])
             })
-            .ok_or("The instance did not return an image filename.")?;
+            .ok_or(fl!("upload-missing-filename"))?;
         url.path_segments_mut()
-            .map_err(|_| "Invalid image service URL.")?
+            .map_err(|_| fl!("image-service-url-invalid"))?
             .push(&file);
         Ok(url.into())
     }
@@ -194,18 +195,18 @@ impl Api {
         let response = request
             .send()
             .await
-            .map_err(|_| "Could not reach instance".to_string())?;
+            .map_err(|_| fl!("instance-unreachable"))?;
         if !response.status().is_success() {
-            return Err(format!(
-                "The instance rejected the request (HTTP {}).",
-                response.status()
+            return Err(fl!(
+                "request-http-error",
+                status = response.status().as_u16()
             ));
         }
         self.invalidate_reading_cache().await;
         response
             .json()
             .await
-            .map_err(|_| "Unexpected API response".into())
+            .map_err(|_| fl!("api-response-unexpected"))
     }
 
     pub async fn get<Q: Serialize + ?Sized, R: DeserializeOwned>(
@@ -218,7 +219,7 @@ impl Api {
             .map_err(|error| error.message)?
             .json()
             .await
-            .map_err(|e| format!("Unexpected Lemmy API v3 response: {e}"))
+            .map_err(|e| fl!("api-response-invalid", error = e.to_string()))
     }
 
     pub(crate) fn account_cache_scope(instance: &str, account: &str) -> Option<String> {
@@ -276,9 +277,9 @@ impl Api {
         let bytes = response
             .bytes()
             .await
-            .map_err(|e| format!("Unexpected Lemmy API v3 response: {e}"))?;
+            .map_err(|e| fl!("api-response-invalid", error = e.to_string()))?;
         let value = serde_json::from_slice(&bytes)
-            .map_err(|e| format!("Unexpected Lemmy API v3 response: {e}"))?;
+            .map_err(|e| fl!("api-response-invalid", error = e.to_string()))?;
         let _ = tokio::task::spawn_blocking(move || {
             if let Ok(revisions) = REVISIONS.lock()
                 && revisions.get(&scope).copied().unwrap_or_default() == revision
@@ -305,17 +306,21 @@ impl Api {
         }
         let response = request.send().await.map_err(|e| ReadError {
             offline: e.is_connect() || e.is_timeout(),
-            message: format!("Could not reach {}: {e}", self.base),
+            message: fl!(
+                "instance-connection-error",
+                instance = self.base.to_string(),
+                error = e.to_string()
+            ),
         })?;
         let status = response.status();
         if !status.is_success() {
             return Err(ReadError::response(match status.as_u16() {
-                401 | 403 => "This instance requires login or denied this request.".into(),
+                401 | 403 => fl!("instance-access-denied"),
                 404 => {
-                    "Lemmy API v3 was not found. This reader supports Lemmy 0.19 instances.".into()
+                    fl!("api-not-found")
                 }
-                429 => "This instance is rate limiting requests. Wait a moment and retry.".into(),
-                _ => format!("The instance returned HTTP {status}. Please retry."),
+                429 => fl!("instance-rate-limited"),
+                _ => fl!("instance-http-error", status = status.as_u16()),
             }));
         }
         Ok(response)
@@ -340,22 +345,22 @@ async fn cached_response(key: String, max_age: Duration) -> Option<Vec<u8>> {
 pub fn normalize_instance(input: &str) -> Result<Url, String> {
     let input = input.trim();
     if input.is_empty() {
-        return Err("Enter a Lemmy instance, such as lemmy.world.".into());
+        return Err(fl!("instance-prompt"));
     }
     let input = if input.contains("://") {
         input.to_owned()
     } else {
         format!("https://{input}")
     };
-    let mut url = Url::parse(&input).map_err(|_| "Enter a valid instance URL.".to_owned())?;
+    let mut url = Url::parse(&input).map_err(|_| fl!("instance-url-invalid"))?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-        return Err("Use an HTTP or HTTPS instance URL.".into());
+        return Err(fl!("instance-scheme-required"));
     }
     if !url.username().is_empty() || url.password().is_some() {
-        return Err("Instance URLs must not contain credentials.".into());
+        return Err(fl!("instance-credentials-not-allowed"));
     }
     if url.path() != "/" && !url.path().is_empty() {
-        return Err("Enter the instance root URL, without a community or post path.".into());
+        return Err(fl!("instance-url-root"));
     }
     url.set_query(None);
     url.set_fragment(None);
@@ -377,7 +382,7 @@ pub(crate) mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
     #[tokio::test]
-    async fn reuses_reading_cache_after_reopening_and_isolates_accounts() {
+    async fn reading_cache_scope() {
         let (api, request) = serve("200 OK", r#"{"value":"account one"}"#).await;
         let base = api.base.to_string();
         let account = api
@@ -436,7 +441,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn uploads_an_image_to_the_active_instance() {
+    async fn image_upload() {
         let (api, request) = serve(
             "200 OK",
             r#"{"files":[{"file":"new image.png"}],"msg":"ok"}"#,
@@ -459,7 +464,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn normalizes_instance_and_rejects_non_instance_urls() {
+    fn instance_url_validation() {
         assert_eq!(
             normalize_instance(" lemmy.world ").unwrap().as_str(),
             "https://lemmy.world/"
@@ -516,7 +521,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn authentication_is_scoped_to_each_client() {
+    async fn auth_scope() {
         let (api, request) = serve("200 OK", "{}").await;
         let authenticated = api.clone().authenticated("test-token".into());
         let _: serde_json::Value = authenticated.get("site", &()).await.unwrap();
@@ -541,7 +546,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn encodes_query_and_decodes_response() {
+    async fn query_encoding() {
         let (api, request) = serve("200 OK", r#"{"posts":[],"next_page":null}"#).await;
         let response: lemmy_api_common::post::GetPostsResponse = api
             .get("post/list", &[("community_name", "rust@example.com")])
@@ -556,7 +561,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn reports_rate_limits_and_invalid_json() {
+    async fn error_responses() {
         for (status, body, expected) in [
             ("429 Too Many Requests", "{}", "rate limiting"),
             ("200 OK", "<html>oops</html>", "Unexpected Lemmy"),

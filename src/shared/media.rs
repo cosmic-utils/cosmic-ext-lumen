@@ -1,8 +1,10 @@
 //! Image downloads and the in-memory cache shared by feeds and discussions.
+
 use super::{
     cache::{self, Cache},
     local,
 };
+use crate::fl;
 use cosmic::{
     Element,
     iced::{ContentFit, Length, Task, task},
@@ -100,7 +102,7 @@ impl Media {
                 .unwrap_or(true),
             preference_error: preference
                 .err()
-                .map(|error| format!("Could not load image settings: {error}")),
+                .map(|error| fl!("image-settings-load-failed", error = error.to_string())),
         }
     }
 
@@ -225,7 +227,7 @@ impl Media {
                 self.preference_error = local::config_path("media.json")
                     .and_then(|path| local::write(&path, &automatic))
                     .err()
-                    .map(|error| format!("Could not save image settings: {error}"));
+                    .map(|error| fl!("image-settings-save-failed", error = error.to_string()));
             }
             Message::Close => self.opened = None,
             Message::ZoomIn => self.zoom = (self.zoom + 1).min(ZOOM_LEVELS.len() - 1),
@@ -294,7 +296,7 @@ impl Media {
         let url = self.opened.as_deref()?;
         let zoom = ZOOM_LEVELS[self.zoom];
         let mut dialog = widget::dialog()
-            .title("Image")
+            .title(fl!("image"))
             .width(Length::Fill)
             .max_width(1050)
             .max_height(680);
@@ -303,20 +305,23 @@ impl Media {
                 .align_y(cosmic::iced::Alignment::Center)
                 .push(
                     button::icon(icon::from_name("zoom-out-symbolic"))
-                        .tooltip("Zoom out")
+                        .tooltip(fl!("zoom-out"))
                         .on_press_maybe((self.zoom > 0).then_some(Message::ZoomOut)),
                 )
                 .push(
                     button::standard(if self.zoom == 0 {
-                        "Fit".to_owned()
+                        fl!("fit")
                     } else {
-                        format!("{:.0}%", zoom * 100.0)
+                        fl!(
+                            "image-zoom-percent",
+                            percent = ((zoom * 100.0).round() as u32)
+                        )
                     })
                     .on_press_maybe((self.zoom > 0).then_some(Message::ResetZoom)),
                 )
                 .push(
                     button::icon(icon::from_name("zoom-in-symbolic"))
-                        .tooltip("Zoom in")
+                        .tooltip(fl!("zoom-in"))
                         .on_press_maybe(
                             (self.zoom + 1 < ZOOM_LEVELS.len()).then_some(Message::ZoomIn),
                         ),
@@ -346,17 +351,17 @@ impl Media {
             dialog = dialog.control(controls).control(viewport);
         } else {
             let status = if self.pending.contains_key(&(url.to_owned(), Size::Preview)) {
-                "Loading image…"
+                fl!("loading-image")
             } else {
-                "This image could not be displayed."
+                fl!("image-display-failed")
             };
             dialog = dialog.body(status);
         }
         Some(
             dialog
-                .primary_action(button::standard("Close").on_press(Message::Close))
+                .primary_action(button::standard(fl!("close")).on_press(Message::Close))
                 .secondary_action(
-                    button::text("Open in browser")
+                    button::text(fl!("open-in-browser"))
                         .on_press(Message::OpenInBrowser(url.to_owned())),
                 )
                 .into(),
@@ -508,7 +513,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn feed_thumbnail_falls_back_to_original_and_markdown_images() {
+    fn thumbnail_fallback() {
         use crate::features::post::tests::post_view;
 
         let mut post = post_view();
@@ -546,7 +551,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn can_open_a_cached_image_without_its_server() {
+    async fn cached_image_offline() {
         let mut png = Cursor::new(Vec::new());
         ::image::DynamicImage::new_rgba8(8, 8)
             .write_to(&mut png, ::image::ImageFormat::Png)
@@ -562,7 +567,7 @@ mod tests {
     }
 
     #[test]
-    fn decodes_and_bounds_image_dimensions() {
+    fn image_dimensions() {
         let mut png = Cursor::new(Vec::new());
         ::image::DynamicImage::new_rgba8(512, 256)
             .write_to(&mut png, ::image::ImageFormat::Png)
@@ -586,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_downloads_are_deduplicated_and_can_be_retried() {
+    fn download_retry() {
         use cosmic::iced::runtime;
         let mut media = Media::new(reqwest::Client::new());
         media.automatic = true;
@@ -601,7 +606,7 @@ mod tests {
         assert!(runtime::task::into_stream(media.update(Message::Open(url))).is_some());
     }
     #[test]
-    fn manual_image_requests_work_with_automatic_loading_disabled() {
+    fn manual_image_load() {
         use cosmic::iced::runtime;
 
         let mut media = Media::new(reqwest::Client::new());
@@ -612,7 +617,7 @@ mod tests {
     }
 
     #[test]
-    fn image_viewer_clamps_zoom_and_resets_for_each_image() {
+    fn image_zoom_limits() {
         let mut media = Media::new(reqwest::Client::new());
         let _ = media.update(Message::Open("https://example.com/one.png".into()));
         for _ in 0..ZOOM_LEVELS.len() {

@@ -1,3 +1,4 @@
+use crate::fl;
 use serde::{Serialize, de::DeserializeOwned};
 use std::{
     fs::{self, OpenOptions},
@@ -12,7 +13,7 @@ pub fn project_dirs() -> Option<directories::ProjectDirs> {
 pub fn config_path(relative: impl AsRef<Path>) -> io::Result<PathBuf> {
     project_dirs()
         .map(|dirs| dirs.config_dir().join(relative))
-        .ok_or_else(|| io::Error::other("Could not locate the settings directory"))
+        .ok_or_else(|| io::Error::other(fl!("settings-dir-not-found")))
 }
 
 pub fn read<T: DeserializeOwned>(path: &Path) -> io::Result<Option<T>> {
@@ -29,7 +30,7 @@ pub fn write(path: &Path, value: &impl Serialize) -> io::Result<()> {
     let bytes = serde_json::to_vec(value).map_err(io::Error::other)?;
     let directory = path
         .parent()
-        .ok_or_else(|| io::Error::other("Missing settings directory"))?;
+        .ok_or_else(|| io::Error::other(fl!("settings-dir-missing")))?;
     fs::create_dir_all(directory)?;
     let temporary = directory.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
     let mut options = OpenOptions::new();

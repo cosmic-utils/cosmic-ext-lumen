@@ -1,4 +1,5 @@
 use super::{App, Column, Destination, Drawer, Message, SEARCH_ID};
+use crate::fl;
 use crate::{
     features::{feed, post},
     shared::{
@@ -76,7 +77,7 @@ impl App {
             return Vec::new();
         }
         let width = (self.width - 200.0).clamp(110.0, 330.0);
-        let search = widget::search_input("Search or paste a link", &self.search)
+        let search = widget::search_input(fl!("search-placeholder"), &self.search)
             .id(SEARCH_ID.into())
             .width(Length::Fixed(width))
             .on_input(Message::SearchInput)
@@ -95,13 +96,13 @@ impl App {
         }
         let action = (!self.accounts.busy).then_some(Message::NewPost);
         let control = if self.width >= 680.0 {
-            button::suggested("New post")
+            button::suggested(fl!("new-post"))
                 .leading_icon(icon::from_name("list-add-symbolic"))
                 .on_press_maybe(action)
                 .into()
         } else {
             button::icon(icon::from_name("list-add-symbolic"))
-                .tooltip("New post")
+                .tooltip(fl!("new-post"))
                 .on_press_maybe(action)
                 .into()
         };
@@ -114,7 +115,10 @@ impl App {
             account.and_then(|account| account.avatar.as_deref()),
             "avatar-default-symbolic",
         );
-        let label = account.map_or("Accounts", |account| account.name.as_str());
+        let label = account.map_or_else(
+            || fl!("accounts").into(),
+            |account| std::borrow::Cow::Borrowed(account.name.as_str()),
+        );
         if self.width >= 680.0 {
             button::standard(label)
                 .leading_icon(avatar)
@@ -136,11 +140,11 @@ impl App {
                 .spacing(space.space_s)
                 .push(widget::text::title1(crate::i18n::app_title()));
             if self.accounts.busy {
-                welcome = welcome.push(widget::text::body("Restoring account…"));
+                welcome = welcome.push(widget::text::body(fl!("restoring-account")));
             } else {
                 welcome = welcome
                     .push(self.instance.view().map(Message::Instance))
-                    .push(button::standard("Sign in").on_press(Message::OpenAccounts));
+                    .push(button::standard(fl!("sign-in")).on_press(Message::OpenAccounts));
             }
             return widget::container(
                 widget::container(welcome)
@@ -228,13 +232,13 @@ impl App {
 
     fn feed_title(&self) -> String {
         match self.feed.scope() {
-            feed::Scope::All => "All posts".into(),
-            feed::Scope::Local => "Local".into(),
-            feed::Scope::Subscribed => "Subscribed".into(),
-            feed::Scope::Saved => "Saved".into(),
-            feed::Scope::Search => "Search results".into(),
+            feed::Scope::All => fl!("all-posts"),
+            feed::Scope::Local => fl!("local"),
+            feed::Scope::Subscribed => fl!("subscribed"),
+            feed::Scope::Saved => fl!("saved"),
+            feed::Scope::Search => fl!("search-results"),
             feed::Scope::Profile(_) => self.feed.profile().map_or_else(
-                || "Profile".into(),
+                || fl!("profile"),
                 |person| {
                     person
                         .display_name
@@ -243,7 +247,7 @@ impl App {
                 },
             ),
             feed::Scope::Community(_) => self.community_scope.as_ref().map_or_else(
-                || "Community".into(),
+                || fl!("community"),
                 |community| community_title(community).to_owned(),
             ),
         }
@@ -263,14 +267,17 @@ impl App {
                 content = content.push(self.accounts.view(&self.media).map(Message::Accounts));
                 content = content.push(widget::divider::horizontal::light()).push(
                     widget::toggler(self.media.automatic())
-                        .label("Load images automatically".to_owned())
+                        .label(fl!("load-images-automatically"))
                         .spacing(space.space_xxs)
                         .on_toggle(|enabled| Message::Media(media::Message::Automatic(enabled))),
                 );
                 if let Some(error) = self.media.preference_error() {
                     content = content.push(widget::text::caption(error));
                 }
-                Some(context_drawer(content, Message::CloseDrawer).title("Accounts and instances"))
+                Some(
+                    context_drawer(content, Message::CloseDrawer)
+                        .title(fl!("accounts-and-instances")),
+                )
             }
             Drawer::Community(details) => {
                 let mut content = widget::column::with_capacity(6).spacing(space.space_s);
@@ -285,20 +292,20 @@ impl App {
                                     .push(self.media.community_avatar(community).icon().size(24))
                                     .push(widget::text::title3(community_label(community))),
                             )
-                            .push(widget::text::caption(format!(
-                                "{} subscribers",
-                                view.counts.subscribers
+                            .push(widget::text::caption(fl!(
+                                "community-subscribers",
+                                count = view.counts.subscribers
                             )));
                         let mut actions = widget::column::with_capacity(3)
                             .spacing(space.space_xxs)
-                            .push(button::standard("Browse community").on_press(Message::Post(
-                                post::Message::OpenCommunity(community.id),
-                            )));
+                            .push(button::standard(fl!("browse-community")).on_press(
+                                Message::Post(post::Message::OpenCommunity(community.id)),
+                            ));
                         if self.feed.signed_in() {
                             let label = match view.subscribed {
-                                SubscribedType::Subscribed => "Unsubscribe",
-                                SubscribedType::NotSubscribed => "Subscribe",
-                                SubscribedType::Pending => "Cancel pending subscription",
+                                SubscribedType::Subscribed => fl!("unsubscribe"),
+                                SubscribedType::NotSubscribed => fl!("subscribe"),
+                                SubscribedType::Pending => fl!("subscription-cancel-pending"),
                             };
                             actions = actions.push(
                                 button::standard(label)
@@ -313,7 +320,7 @@ impl App {
                             );
                         }
                         actions = actions.push(
-                            button::text("Open in browser")
+                            button::text(fl!("open-in-browser"))
                                 .on_press(Message::OpenLink(community.actor_id.to_string())),
                         );
                         content = content.push(actions);
@@ -324,12 +331,12 @@ impl App {
                         }
                     }
                     Some(Err(error)) => content = content.push(widget::text::body(error)),
-                    None => content = content.push(widget::text::body("Loading community…")),
+                    None => content = content.push(widget::text::body(fl!("loading-community"))),
                 }
                 if let Some(error) = &details.follow_error {
                     content = content.push(widget::text::body(error));
                 }
-                Some(context_drawer(content, Message::CloseDrawer).title("Community details"))
+                Some(context_drawer(content, Message::CloseDrawer).title(fl!("community-details")))
             }
         }
     }

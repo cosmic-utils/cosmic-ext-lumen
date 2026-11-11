@@ -1,4 +1,5 @@
 use super::{Action, Comment, CommentTarget, Composer, Message, Post, thread};
+use crate::fl;
 use crate::shared::{
     api::Api,
     media::{self, Media, Size},
@@ -52,15 +53,19 @@ impl<'a> markdown::Viewer<'a, Message, cosmic::Theme, cosmic::Renderer> for Disc
             return cosmic::iced::widget::rich_text(alt.spans(settings.style)).into();
         }
         let label = if title.is_empty() {
-            "View image"
+            fl!("view-image").into()
         } else {
-            title
+            std::borrow::Cow::Borrowed(title)
         };
         preview_image(self.0, url, label)
     }
 }
 
-fn preview_image<'a>(media: &Media, url: &str, label: &'a str) -> Element<'a, Message> {
+fn preview_image<'a>(
+    media: &Media,
+    url: &str,
+    label: impl Into<std::borrow::Cow<'a, str>>,
+) -> Element<'a, Message> {
     let open = Message::OpenImage(url.to_owned());
     let height = Length::Fixed(320.0);
     let preview: Element<'_, Message> = if let Some(picture) = media.get(url, Size::Preview) {
@@ -92,7 +97,7 @@ fn link_preview<'a>(
     if let Some(image) = media::direct_image(post).filter(|url| media::web_url(url)) {
         let mut content = widget::column::with_capacity(2)
             .spacing(space.space_xxxs)
-            .push(preview_image(media, image, "View image"));
+            .push(preview_image(media, image, fl!("view-image")));
         if let Some(alt) = post.alt_text.as_deref().filter(|alt| !alt.is_empty()) {
             content = content.push(widget::text::caption(alt).wrapping(Wrapping::WordOrGlyph));
         }
@@ -154,9 +159,9 @@ impl Post {
         let generation = self.generation;
         let submitting = self.submitting_target() == Some(target);
         let (placeholder, label) = match target {
-            CommentTarget::Post => ("Write a comment", "Post comment"),
-            CommentTarget::Reply(_) => ("Write a reply", "Post reply"),
-            CommentTarget::Edit(_) => ("Edit comment", "Save changes"),
+            CommentTarget::Post => (fl!("write-a-comment"), fl!("post-comment")),
+            CommentTarget::Reply(_) => (fl!("write-a-reply"), fl!("post-reply")),
+            CommentTarget::Edit(_) => (fl!("edit-comment"), fl!("save-changes")),
         };
         let mut editor = text_editor(&composer.draft, placeholder).height(Length::Fixed(100.0));
         if !submitting {
@@ -176,8 +181,8 @@ impl Post {
             }
             && !composer.draft.text().trim().is_empty();
         let label = match (submitting, target) {
-            (true, CommentTarget::Edit(_)) => "Saving…",
-            (true, _) => "Posting…",
+            (true, CommentTarget::Edit(_)) => fl!("saving"),
+            (true, _) => fl!("posting"),
             (false, _) => label,
         };
         let cancel = match target {
@@ -192,7 +197,7 @@ impl Post {
                     can_submit.then_some(Message::SubmitComment(generation, target)),
                 ))
                 .push(
-                    widget::button::standard("Cancel")
+                    widget::button::standard(fl!("cancel"))
                         .on_press_maybe(self.submitting.is_none().then_some(cancel)),
                 );
         let mut content = widget::column::with_capacity(3)
@@ -216,7 +221,7 @@ impl Post {
     ) -> Element<'a, Message> {
         let space = cosmic::theme::active().cosmic().spacing;
         let Some(post) = &self.selected else {
-            return widget::container(widget::text::body("Select a post to open its discussion."))
+            return widget::container(widget::text::body(fl!("discussion-select-post")))
                 .padding(space.space_m)
                 .into();
         };
@@ -233,12 +238,12 @@ impl Post {
         if show_back {
             toolbar = toolbar.push(
                 button::icon(icon::from_name("go-previous-symbolic"))
-                    .tooltip("Back to posts")
+                    .tooltip(fl!("back-to-posts"))
                     .on_press(Message::Back),
             );
         }
         toolbar = toolbar
-            .push(widget::text::body("Discussion").font(cosmic::font::semibold()))
+            .push(widget::text::body(fl!("discussion")).font(cosmic::font::semibold()))
             .push(widget::space().width(Length::Fill));
         if can_focus {
             toolbar = toolbar.push(
@@ -248,9 +253,9 @@ impl Post {
                     "view-fullscreen-symbolic"
                 }))
                 .tooltip(if focused {
-                    "Show feed beside discussion"
+                    fl!("feed-beside-discussion")
                 } else {
-                    "Focus reading"
+                    fl!("focus-reading")
                 })
                 .class(toggle_button_class(focused, button::ButtonClass::Icon))
                 .on_press(Message::ToggleFocus),
@@ -258,7 +263,7 @@ impl Post {
         }
         toolbar = toolbar.push(
             button::icon(icon::from_name("dialog-information-symbolic"))
-                .tooltip("Community details")
+                .tooltip(fl!("community-details"))
                 .on_press(Message::CommunityDetails),
         );
         if let Some(url) = self
@@ -268,7 +273,7 @@ impl Post {
         {
             toolbar = toolbar.push(
                 button::icon(icon::from_name("web-browser-symbolic"))
-                    .tooltip("Open discussion in browser")
+                    .tooltip(fl!("discussion-open-browser"))
                     .on_press(Message::Link(url.to_string())),
             );
         }
@@ -307,12 +312,12 @@ impl Post {
                 .find(|comment| comment.data.comment.id == id)
             {
                 content = content
-                    .push(widget::text::caption("Comment in context"))
+                    .push(widget::text::caption(fl!("comment-in-context")))
                     .push(self.comment_card(comment, can_write, signed_in, account_busy, 0, media));
             } else if let Some(error) = &self.focus_error {
                 content = content.push(widget::text::body(error));
             } else {
-                content = content.push(widget::text::caption("Loading comment…"));
+                content = content.push(widget::text::caption(fl!("loading-comment")));
             }
         }
         if available {
@@ -328,9 +333,9 @@ impl Post {
             }
         } else {
             content = content.push(widget::text::body(if post.post.deleted {
-                "This post was deleted."
+                fl!("post-deleted")
             } else {
-                "This post was removed."
+                fl!("post-removed")
             }));
         }
         let mut actions = widget::row::with_capacity(2)
@@ -346,49 +351,57 @@ impl Post {
             ));
         if signed_in && (available || post.saved) {
             actions = actions.push(
-                button::standard(if post.saved { "Saved" } else { "Save" })
-                    .class(toggle_button_class(
-                        post.saved,
-                        button::ButtonClass::Standard,
-                    ))
-                    .leading_icon(icon::from_name("bookmark-new-symbolic"))
-                    .on_press_maybe(
-                        can_act.then_some(Message::Act(self.generation, Action::ToggleSaved)),
-                    ),
+                button::standard(if post.saved {
+                    fl!("saved")
+                } else {
+                    fl!("save")
+                })
+                .class(toggle_button_class(
+                    post.saved,
+                    button::ButtonClass::Standard,
+                ))
+                .leading_icon(icon::from_name("bookmark-new-symbolic"))
+                .on_press_maybe(
+                    can_act.then_some(Message::Act(self.generation, Action::ToggleSaved)),
+                ),
             );
         }
         if signed_in && available {
             actions = actions.push(
-                button::text("Cross-post")
+                button::text(fl!("cross-post"))
                     .on_press_maybe(can_act.then_some(Message::CrossPost(post.post.id))),
             );
         }
         if signed_in && self.owns_post(post) && !post.post.removed {
             if post.post.deleted {
-                actions = actions.push(button::text("Restore post").on_press_maybe(
+                actions = actions.push(button::text(fl!("restore-post")).on_press_maybe(
                     can_act.then_some(Message::Act(self.generation, Action::SetDeleted(false))),
                 ));
             } else {
                 actions = actions
                     .push(
-                        button::text("Edit post")
+                        button::text(fl!("edit-post"))
                             .on_press_maybe(can_act.then_some(Message::EditPost(post.post.id))),
                     )
-                    .push(button::text("Delete post").on_press_maybe(
+                    .push(button::text(fl!("delete-post")).on_press_maybe(
                         can_act.then_some(Message::ConfirmDelete(self.generation)),
                     ));
             }
         }
         content = content.push(actions.wrap());
         if self.confirm_delete {
-            content = content.push(widget::text::body("Delete this post?")).push(
-                widget::row::with_capacity(2)
-                    .spacing(space.space_xxs)
-                    .push(button::destructive("Delete").on_press_maybe(
-                        can_act.then_some(Message::Act(self.generation, Action::SetDeleted(true))),
-                    ))
-                    .push(button::standard("Cancel").on_press(Message::CancelDelete)),
-            );
+            content = content
+                .push(widget::text::body(fl!("delete-this-post")))
+                .push(
+                    widget::row::with_capacity(2)
+                        .spacing(space.space_xxs)
+                        .push(
+                            button::destructive(fl!("delete")).on_press_maybe(can_act.then_some(
+                                Message::Act(self.generation, Action::SetDeleted(true)),
+                            )),
+                        )
+                        .push(button::standard(fl!("cancel")).on_press(Message::CancelDelete)),
+                );
         }
         if let Some(error) = &self.action_error {
             content = content.push(widget::text::body(error));
@@ -397,28 +410,28 @@ impl Post {
             content = content.push(widget::text::body(error));
         }
         if self.pending_action.is_some() {
-            content = content.push(widget::text::caption("Updating post…"));
+            content = content.push(widget::text::caption(fl!("updating-post")));
         }
 
         let comment_heading = widget::row::with_capacity(2)
             .spacing(space.space_xxs)
             .align_y(Alignment::Center)
-            .push(widget::text::title3("Comments"))
+            .push(widget::text::title3(fl!("comments")))
             .push(widget::text::caption(post.counts.comments.to_string()));
         let mut comment_controls = widget::row::with_capacity(2)
             .spacing(space.space_xxxs)
             .align_y(Alignment::Center)
             .push(widget::dropdown(
-                &["Top", "New", "Old"][..],
+                vec![fl!("top"), fl!("new"), fl!("old")],
                 Some(self.sort),
                 Message::Sort,
             ));
         if can_write {
             comment_controls = comment_controls.push(
                 button::suggested(if self.composer_open {
-                    "Close"
+                    fl!("close")
                 } else {
-                    "Add comment"
+                    fl!("add-comment")
                 })
                 .padding([0, space.space_xxs])
                 .on_press_maybe(
@@ -444,7 +457,7 @@ impl Post {
             .push(widget::divider::horizontal::light())
             .push(comment_header);
         if post.post.locked {
-            content = content.push(widget::text::caption("This discussion is locked."));
+            content = content.push(widget::text::caption(fl!("discussion-locked")));
         }
         if self.composer_open && can_write {
             content = content.push(self.comment_composer(
@@ -457,12 +470,12 @@ impl Post {
         if let Some(error) = &self.error {
             content = content
                 .push(widget::text::body(error))
-                .push(button::standard("Retry comments").on_press(Message::Retry));
+                .push(button::standard(fl!("retry-comments")).on_press(Message::Retry));
         }
         if self.busy && self.comments.is_empty() {
-            content = content.push(widget::text::body("Loading comments…"));
+            content = content.push(widget::text::body(fl!("loading-comments")));
         } else if self.comments.is_empty() && self.error.is_none() {
-            content = content.push(widget::text::body("No comments yet."));
+            content = content.push(widget::text::body(fl!("comments-empty")));
         }
         for comment in &self.comments {
             if Some(comment.data.comment.id) != self.focused_comment
@@ -479,10 +492,11 @@ impl Post {
             }
         }
         if self.busy && !self.comments.is_empty() {
-            content = content.push(widget::text::caption("Loading comments…"));
+            content = content.push(widget::text::caption(fl!("loading-comments")));
         }
         if self.more && !self.busy && self.error.is_none() {
-            content = content.push(button::standard("Load more comments").on_press(Message::More));
+            content =
+                content.push(button::standard(fl!("load-more-comments")).on_press(Message::More));
         }
         let article = widget::container(content)
             .padding([
@@ -541,9 +555,9 @@ impl Post {
                 }))
                 .padding(space.space_xxxs)
                 .tooltip(if collapsed {
-                    "Expand comment"
+                    fl!("expand-comment")
                 } else {
-                    "Collapse comment"
+                    fl!("collapse-comment")
                 })
                 .on_press(Message::Collapse(id.0)),
             );
@@ -579,9 +593,9 @@ impl Post {
                     button::icon(icon::from_name("user-bookmarks-symbolic"))
                         .class(toggle_button_class(saved, button::ButtonClass::Icon))
                         .tooltip(if saved {
-                            "Unsave comment"
+                            fl!("unsave-comment")
                         } else {
-                            "Save comment"
+                            fl!("save-comment")
                         })
                         .on_press_maybe(
                             (can_vote || (saved && can_act))
@@ -591,7 +605,7 @@ impl Post {
             }
             if can_write && !comment.data.comment.deleted && !comment.data.comment.removed {
                 actions = actions.push(
-                    button::text("Reply")
+                    button::text(fl!("reply"))
                         .leading_icon(icon::from_name("mail-reply-all-symbolic"))
                         .padding([0, space.space_xxs])
                         .on_press_maybe(
@@ -607,7 +621,7 @@ impl Post {
                 if !deleted {
                     actions = actions.push(
                         button::icon(icon::from_name("document-edit-symbolic"))
-                            .tooltip("Edit comment")
+                            .tooltip(fl!("edit-comment"))
                             .on_press_maybe(
                                 (can_change && self.edit.is_none())
                                     .then_some(Message::OpenEdit(self.generation, id)),
@@ -621,9 +635,9 @@ impl Post {
                         "edit-delete-symbolic"
                     }))
                     .tooltip(if deleted {
-                        "Restore comment"
+                        fl!("restore-comment")
                     } else {
-                        "Delete comment"
+                        fl!("delete-comment")
                     })
                     .on_press_maybe(
                         can_change.then_some(Message::DeleteComment(self.generation, id)),
@@ -633,13 +647,13 @@ impl Post {
             if comment.parent().is_some() {
                 actions = actions.push(
                     button::icon(icon::from_name("go-top-symbolic"))
-                        .tooltip("Jump to parent comment")
+                        .tooltip(fl!("comment-parent"))
                         .on_press(Message::JumpToParent(self.generation, id)),
                 );
             }
             actions = actions.push(
                 button::icon(icon::from_name("edit-copy-symbolic"))
-                    .tooltip("Copy comment permalink")
+                    .tooltip(fl!("copy-comment-permalink"))
                     .on_press(Message::CopyPermalink(
                         comment.data.comment.ap_id.to_string(),
                     )),
@@ -713,9 +727,9 @@ fn votes(
             button::icon(icon::from_name("go-up-symbolic"))
                 .padding(4)
                 .tooltip(if current == Some(1) {
-                    "Clear upvote"
+                    fl!("clear-upvote")
                 } else {
-                    "Upvote"
+                    fl!("upvote")
                 })
                 .class(toggle_button_class(
                     current == Some(1),
@@ -728,9 +742,9 @@ fn votes(
             button::icon(icon::from_name("go-down-symbolic"))
                 .padding(4)
                 .tooltip(if current == Some(-1) {
-                    "Clear downvote"
+                    fl!("clear-downvote")
                 } else {
-                    "Downvote"
+                    fl!("downvote")
                 })
                 .class(toggle_button_class(
                     current == Some(-1),

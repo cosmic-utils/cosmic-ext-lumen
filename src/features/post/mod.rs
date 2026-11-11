@@ -1,4 +1,3 @@
-//! Post reading, authenticated actions, and paginated comment threads.
 mod service;
 mod thread;
 mod view;
@@ -7,6 +6,7 @@ pub(crate) use view::render_markdown;
 
 pub const SCROLL_ID: &str = "lumen-discussion";
 
+use crate::fl;
 use crate::shared::{
     api::{Api, Freshness},
     links::open_web_link,
@@ -685,14 +685,14 @@ impl Post {
 
     fn parse_comment(data: CommentView) -> Comment {
         let text = if data.comment.deleted {
-            "[deleted]"
+            fl!("comment-deleted").into()
         } else if data.comment.removed {
-            "[removed]"
+            fl!("comment-removed").into()
         } else {
-            &data.comment.content
+            std::borrow::Cow::Borrowed(data.comment.content.as_str())
         };
         Comment {
-            body: markdown::Content::parse(text),
+            body: markdown::Content::parse(&text),
             path: thread::path_ids(&data.comment.path),
             data,
         }
@@ -964,7 +964,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn opening_a_post_loads_its_thread_without_the_default_feed_scope() {
+    async fn post_thread_load() {
         let mut selected = post_view();
         selected.post.local = false;
         selected.community.local = false;
@@ -995,7 +995,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn clicking_an_existing_comment_vote_clears_it_after_confirmation() {
+    async fn comment_vote_toggle() {
         let selected = post_view();
         let existing = comment_view(&selected, "Vote on this comment");
         let mut updated = existing.clone();
@@ -1029,7 +1029,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn comment_changes_use_owner_and_server_confirmed_state() {
+    async fn comment_state() {
         let selected = post_view();
         let original = comment_view(&selected, "Original");
         let id = original.comment.id;
@@ -1119,7 +1119,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn reply_uses_the_selected_parent_and_preserves_draft_on_failure() {
+    async fn reply_draft() {
         let previous = post_view();
         let parent = comment_view(&previous, "Parent comment");
         let parent_id = parent.comment.id;
@@ -1202,7 +1202,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn comment_submission_uses_selected_account_and_preserves_rejected_draft() {
+    async fn comment_submit_draft() {
         let text = "Hello\n\n**Lemmy**";
         let previous = post_view();
         let reply = json!({
@@ -1293,7 +1293,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn actions_use_the_selected_account_and_only_apply_successful_responses() {
+    async fn account_actions() {
         for (action, route, body, (old_vote, old_saved), (vote, saved)) in [
             (
                 Action::Upvote,
@@ -1400,7 +1400,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn session_changes_discard_old_action_results_and_anonymous_actions() {
+    fn session_action_results() {
         let api = Api::new(reqwest::Client::new(), "example.com").unwrap();
         let previous = post_view();
         let mut post = Post::default();
@@ -1429,7 +1429,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn closing_post_invalidates_pending_comment_response() {
+    fn close_post_response() {
         let mut post = Post::default();
         post.reset();
         let _ = post.update(Message::Loaded(0, Err("stale error".into())));
@@ -1438,7 +1438,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn switching_discussions_preserves_drafts_and_recovers_a_failed_submission() {
+    async fn discussion_switch_draft() {
         let (api, request) = serve("403 Forbidden", "{}").await;
         let api = api.authenticated("test-account".into());
         let first = post_view();
@@ -1482,7 +1482,7 @@ pub(crate) mod tests {
         request.await.unwrap();
     }
     #[tokio::test]
-    async fn deleting_a_post_requires_ownership_and_confirmation() {
+    async fn post_delete_permissions() {
         let existing = post_view();
         let mut deleted = existing.clone();
         deleted.post.deleted = true;

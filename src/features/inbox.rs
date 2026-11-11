@@ -1,4 +1,4 @@
-//! Account-scoped replies and mentions.
+use crate::fl;
 use crate::shared::{api::Api, media::Media, presentation::age};
 use cosmic::{
     Element,
@@ -285,11 +285,11 @@ impl Inbox {
         let radius = theme.cosmic().corner_radii.radius_s;
         let header = widget::row::with_capacity(3)
             .align_y(Alignment::Center)
-            .push(widget::text::title3("Inbox"))
+            .push(widget::text::title3(fl!("inbox")))
             .push(widget::space().width(Length::Fill))
             .push(
                 button::icon(icon::from_name("view-refresh-symbolic"))
-                    .tooltip("Refresh inbox")
+                    .tooltip(fl!("refresh-inbox"))
                     .on_press_maybe(self.can_act().then_some(Message::Refresh)),
             );
         let mut content =
@@ -298,21 +298,34 @@ impl Inbox {
             content = content.push(widget::text::body(error));
         } else if self.notices.is_empty() {
             let label = if self.busy {
-                "Loading inbox…"
+                fl!("loading-inbox")
             } else if self.loaded {
-                "No replies or mentions."
+                fl!("inbox-empty")
             } else {
-                "Refresh to load your inbox."
+                fl!("inbox-refresh-prompt")
             };
             content = content.push(widget::text::body(label));
         }
         let can_open = self.can_act() && !account_busy;
         for notice in &self.notices {
-            let action = match notice.id {
-                NoticeId::Reply(_) => "replied",
-                NoticeId::Mention(_) => "mentioned you",
+            let elapsed = age(notice.published);
+            let summary = match notice.id {
+                NoticeId::Reply(_) => fl!(
+                    "inbox-reply",
+                    author = notice.author.as_str(),
+                    age = elapsed
+                ),
+                NoticeId::Mention(_) => fl!(
+                    "inbox-mention",
+                    author = notice.author.as_str(),
+                    age = elapsed
+                ),
             };
-            let status = if notice.read { "" } else { " · Unread" };
+            let summary = if notice.read {
+                summary
+            } else {
+                fl!("inbox-notice-unread", notice = summary)
+            };
             let title = button::custom(
                 widget::text::body(&notice.title)
                     .font(cosmic::font::semibold())
@@ -325,9 +338,9 @@ impl Inbox {
             .selected(selected == Some(notice.comment))
             .on_press_maybe(can_open.then_some(Message::Open(notice.id)));
             let (symbol, label) = if notice.read {
-                ("image-red-eye-symbolic", "Mark as unread")
+                ("image-red-eye-symbolic", fl!("mark-as-unread"))
             } else {
-                ("document-properties-symbolic", "Mark as read")
+                ("document-properties-symbolic", fl!("mark-as-read"))
             };
             let read_control = button::icon(icon::from_name(symbol))
                 .tooltip(label)
@@ -342,13 +355,9 @@ impl Inbox {
                         .size(16),
                 )
                 .push(
-                    widget::text::caption(format!(
-                        "{} {action} · {}{status}",
-                        notice.author,
-                        age(notice.published)
-                    ))
-                    .wrapping(Wrapping::WordOrGlyph)
-                    .width(Length::Fill),
+                    widget::text::caption(summary)
+                        .wrapping(Wrapping::WordOrGlyph)
+                        .width(Length::Fill),
                 )
                 .push(read_control);
             let card = widget::column::with_capacity(2)
@@ -361,11 +370,11 @@ impl Inbox {
             );
         }
         if self.opening.is_some() {
-            content = content.push(widget::text::caption("Opening discussion…"));
+            content = content.push(widget::text::caption(fl!("opening-discussion")));
         }
         if self.more && !self.busy {
             content = content.push(
-                button::standard("Load more")
+                button::standard(fl!("load-more"))
                     .on_press_maybe(self.can_act().then_some(Message::More)),
             );
         }
@@ -469,7 +478,7 @@ async fn set_read(api: &Api, id: NoticeId, read: bool) -> Result<bool, String> {
         }
     };
     if updated_id != id || updated_read != read {
-        return Err("The instance did not confirm the requested read status.".into());
+        return Err(fl!("inbox-read-unconfirmed"));
     }
     Ok(updated_read)
 }
@@ -485,7 +494,7 @@ mod tests {
     use serde_json::{Value, json};
 
     #[tokio::test]
-    async fn read_controls_use_the_active_account_and_wait_for_confirmation() {
+    async fn inbox_read_status() {
         let post = post_view();
         let comment = comment_view(&post, "Inbox comment");
         for (id, endpoint, view_key, notice_key, id_key, read) in [

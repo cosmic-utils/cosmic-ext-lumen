@@ -1,4 +1,5 @@
 use super::{Scope, Sort};
+use crate::fl;
 use crate::shared::api::{Api, Freshness};
 use lemmy_api_common::{
     comment::{GetComments, GetCommentsResponse},
@@ -132,7 +133,7 @@ pub async fn profile(
         )
         .await?;
     if response.person_view.person.id != id {
-        return Err("The instance returned a different person.".into());
+        return Err(fl!("person-mismatch"));
     }
     Ok(response)
 }

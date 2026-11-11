@@ -1049,6 +1049,7 @@ version = "0.1.0"
 dependencies = [
  "directories",
  "i18n-embed",
+ "i18n-embed-fl",
  "image",
  "keyring",
  "lemmy_api_common",

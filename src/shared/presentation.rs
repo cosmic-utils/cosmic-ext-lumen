@@ -1,3 +1,4 @@
+use crate::fl;
 use cosmic::{
     Element,
     iced::{Border, Color, Length},
@@ -14,10 +15,10 @@ pub fn age(timestamp: i64) -> String {
         .map_or(0, |duration| duration.as_secs() as i64);
     let minutes = (now - timestamp).max(0) / 60;
     match minutes {
-        0 => "now".into(),
-        1..60 => format!("{minutes}m"),
-        60..1440 => format!("{}h", minutes / 60),
-        _ => format!("{}d", minutes / 1440),
+        0 => fl!("now"),
+        1..60 => fl!("age-minutes", count = minutes),
+        60..1440 => fl!("age-hours", count = (minutes / 60)),
+        _ => fl!("age-days", count = (minutes / 1440)),
     }
 }
 
@@ -51,7 +52,7 @@ pub fn person_handle(person: &Person) -> String {
 /// A multi-line editor styled to match a COSMIC text input.
 pub fn text_editor<'a, Message: Clone + 'static>(
     content: &'a text_editor::Content<cosmic::Renderer>,
-    placeholder: &'a str,
+    placeholder: impl cosmic::iced::core::text::IntoFragment<'a>,
 ) -> text_editor::TextEditor<'a, Message> {
     let spacing = cosmic::theme::active().cosmic().spacing;
     text_editor::TextEditor::new(content)
