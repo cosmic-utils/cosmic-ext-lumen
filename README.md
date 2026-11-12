@@ -6,6 +6,8 @@
 
 <p align="center"><strong>Find your people. Follow the thread.</strong></p>
 
+<img width="1428" height="939" alt="image" src="https://github.com/user-attachments/assets/6d132930-fbf1-4cd1-90b8-39c676b064da" />
+
 A native Lemmy client for the COSMIC desktop, built with Rust and libcosmic.
 
 Lumen targets Lemmy 0.19.x (API v3). It supports All, Local, Subscribed, and
