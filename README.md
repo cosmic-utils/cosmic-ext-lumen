@@ -4,7 +4,7 @@
 
 <h1 align="center">Lumen</h1>
 
-<p align="center"><strong>Find your people. Follow the thread.</strong></p>
+<p align="center"><strong>Find your people.</strong></p>
 
 <img width="1428" height="939" alt="image" src="https://github.com/user-attachments/assets/6d132930-fbf1-4cd1-90b8-39c676b064da" />
 
